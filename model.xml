@@ -1,0 +1,3606 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE nta PUBLIC '-//Uppaal Team//DTD Flat System 1.1//EN' 'http://www.it.uu.se/research/group/darts/uppaal/flat-1_2.dtd'>
+<nta>
+	<declaration>
+/******************************************************************************/
+/** System Parameters *********************************************************/
+/******************************************************************************/
+/* Highest address that can be used. */
+const int LAST_ADDR = 16;
+
+/* Number of cores. */
+const int CORE_COUNT = 2;
+
+/* Number of cache lines found in each cache */
+const int LINES_PER_CACHE = 3;
+
+/* Number of components in the system */
+const int COMPONENT_COUNT = 16;
+
+const bool USE_LOCK_FREE_CACHES = true;
+
+/******************************************************************************/
+/** Types *********************************************************************/
+/******************************************************************************/
+
+/**
+* Command ID:
+*  Identifier corresponding to a request (i.e. LOAD/STORE/EVICT) or
+*  query (e.g. GETS/GETM/PUTM).
+*/
+typedef int[0,/*[EVENT_TYPE_COUNT]*/7/*[/EVENT_TYPE_COUNT]*/] cmd_id_t;
+
+/* Data and instruction addresses */
+typedef int[0,LAST_ADDR] addr_t;
+
+/* Unique ID for each system component (used in message passing) */
+typedef int[-1,COMPONENT_COUNT] cmp_id_t;
+const cmp_id_t CMP_ID_T_NULL = -1;
+
+const int INTERFERENCE_TYPES = 3;
+
+typedef int[0,INTERFERENCE_TYPES] interference_id_t;
+
+const interference_id_t INTERFERENCE_MINOR = 0;
+const interference_id_t INTERFERENCE_DEMOTING = 1;
+const interference_id_t INTERFERENCE_EXPELLING = 2;
+
+typedef struct
+{
+   cmp_id_t author;
+   addr_t addr;
+   cmd_id_t cmd;
+} query_t;
+
+/******************************************************************************/
+/** Constants &amp; Limits ********************************************************/
+/******************************************************************************/
+/* Personal preference... */
+const bool FALSE = false;
+const bool TRUE = true;
+
+/* Range of addresses */
+const addr_t ADDR_T_NULL = 0;
+const addr_t ADDR_T_MIN = 1;
+const addr_t ADDR_T_MAX = LAST_ADDR;
+
+/* How many parameters of each type are found in the transient message. */
+const int ADDR_T_PARAMS_MAX = 1;
+const int CMP_ID_T_PARAMS_MAX = 2;
+
+/* Array index indicating the emitter of a transient message. */
+const int CMP_ID_T_EMITTER_PARAM = 0;
+const int CMP_ID_T_RECEIVER_PARAM = 1;
+
+/*[EVENTS_DECLARATION]*/
+/* Command IDs corresponding to the cache controller queries. */
+const cmd_id_t CMD_CCTRL_GET_SHARED = 0;
+const cmd_id_t CMD_CCTRL_GET_MODIFIED = 1;
+const cmd_id_t CMD_CCTRL_PUT_MODIFIED = 2;
+
+/* Command IDs corresponding to the cpu requests. */
+const cmd_id_t CMD_CCTRL_LOAD = 3;
+const cmd_id_t CMD_CCTRL_STORE = 4;
+const cmd_id_t CMD_CCTRL_EVICT = 5;
+
+const cmd_id_t CMD_DATA_MSG = 6;
+const cmd_id_t CMD_NO_DATA_MSG = 7;
+/*[/EVENTS_DECLARATION]*/
+
+/*
+ * Total number of cache lines in the system. This is used to know how many
+ * addresses should be kept track of.
+ */
+const int MAX_AMOUNT_OF_CACHED_LINES = (CORE_COUNT * LINES_PER_CACHE);
+
+/** Time **********************************************************************/
+const int RAM_READ_TIME = 200;
+const int RAM_WRITE_TIME = 200;
+const int QUERY_HANDLING_TIME = 1;
+const int C2C_DATA_TIME = 2;
+const int CLOCK_CYCLE_TIME = 50;
+
+/******************************************************************************/
+const query_t DEFAULT_QUERY_VALUE =
+    {
+        /* author = */ CMP_ID_T_NULL,
+        /* addr = */ ADDR_T_NULL,
+        /* cmd = */ CMD_DATA_MSG
+    };
+
+/******************************************************************************/
+/** Channels ******************************************************************/
+/******************************************************************************/
+
+/* Signal indicating the initialization of the system */
+urgent broadcast chan SYS_INIT;
+
+/* Signal corresponding to a cache controller query passing on the bus */
+urgent broadcast chan QUERY_BROADCAST;
+urgent chan QUERY_TO_BUS[cmp_id_t];
+urgent chan QUERY_IN[cmp_id_t];
+urgent chan QUERY_OUT[cmp_id_t];
+urgent chan DATA_IN[cmp_id_t];
+urgent chan DATA_TRANS[cmp_id_t];
+urgent chan DATA_OUT[cmp_id_t];
+
+chan ADD_BUS_MASTER;
+
+/*
+ * Signal used by CPUs to send a request to their cache controller (whose ID is
+ * the param.
+ */
+urgent chan CPU_REQ[cmp_id_t];
+
+/*
+ * Signal used by cache controllers to acknowledge that a cpu request has been
+ * completed. The param corresponds to the ID of the receiving CPU.
+ */
+urgent chan CPU_ACK[cmp_id_t];
+
+/* Signal used to force a transition to be urgent. */
+urgent chan FORCE_URGENT;
+urgent chan FORCE_EXTRA_URGENT;
+
+urgent chan MEM_READ;
+urgent chan MEM_WRITE;
+broadcast chan MAX_PRIORITY;
+
+/* Forces CPUs to make their requests as soon as possible. */
+chan priority default &lt; QUERY_IN &lt; DATA_IN &lt; MEM_WRITE &lt; MEM_READ &lt; QUERY_TO_BUS &lt; QUERY_BROADCAST &lt; FORCE_URGENT &lt; QUERY_OUT &lt; CPU_REQ &lt; CPU_ACK &lt; FORCE_EXTRA_URGENT &lt; MAX_PRIORITY;
+
+/******************************************************************************/
+/** Channel Parameters Global Variables ***************************************/
+/******************************************************************************/
+/*
+ * Values cannot be passed through channels, instead, we rely on global
+ * variables to store them. This would quickly become unsustainable if not for
+ * the fact that only a single transition can occur at any one time.
+ */
+typedef struct
+{
+   addr_t addr_t_params[ADDR_T_PARAMS_MAX];
+   cmp_id_t cmp_id_t_params[CMP_ID_T_PARAMS_MAX];
+   cmd_id_t cmd_id_t_param;
+} msg_content_t;
+
+/* Default message, used to reset 'msg_content_t' to their default value.
+/* const */ msg_content_t DEFAULT_MSG;
+
+/* Variable containing the message sent during the current transition */
+meta msg_content_t transient_msg;
+
+/* Reset the transient message to its default value */
+void reset_transient_msg ()
+{
+    transient_msg = DEFAULT_MSG;
+}
+
+/******************************************************************************/
+/** Bus Usage Global Variables ************************************************/
+/******************************************************************************/
+
+bool has_use_for_bus[COMPONENT_COUNT];
+bool is_ready_for_bus[COMPONENT_COUNT];
+
+cmp_id_t memory_component_for (const addr_t addr)
+{
+   return 1;
+}
+</declaration>
+	<template>
+		<name>ForceUrgent</name>
+		<location id="id0" x="0" y="0">
+			<label kind="comments" x="212" y="-127">Lets other automata
+turn any transition into
+an "urgent" one.</label>
+		</location>
+		<init ref="id0"/>
+		<transition>
+			<source ref="id0"/>
+			<target ref="id0"/>
+			<label kind="synchronisation" x="-85" y="17">FORCE_EXTRA_URGENT?</label>
+			<nail x="-34" y="17"/>
+			<nail x="34" y="17"/>
+		</transition>
+		<transition>
+			<source ref="id0"/>
+			<target ref="id0"/>
+			<label kind="synchronisation" x="-68" y="-34">FORCE_URGENT?</label>
+			<nail x="-34" y="-17"/>
+			<nail x="34" y="-17"/>
+		</transition>
+	</template>
+	<template>
+		<name>CoherencyMGR</name>
+		<parameter>cmp_id_t ID, cmp_id_t MEM_ID</parameter>
+		<declaration>/******************************************************************************/
+/** Types *********************************************************************/
+/******************************************************************************/
+/* Status of a "coherency" line (real value in RAM vs real value in cache). */
+typedef int[0,/*[CMGR_STATES_COUNT]*/3/*[/CMGR_STATES_COUNT]*/] mem_state_t;
+
+/* index of a "coherency" line in this automaton's status tracking array. */
+typedef int[-1,MAX_AMOUNT_OF_CACHED_LINES] cache_line_status_ix_t;
+
+/*[CMGR_STATES_DECLARATION]*/
+const mem_state_t MEM_U = 0;
+const mem_state_t MEM_M = 1;
+const mem_state_t MEM_U_D = 2;
+const mem_state_t MEM_U_B = 3;
+/*[/CMGR_STATES_DECLARATION]*/
+
+/* (address, status) couple for the status tracking array. */
+typedef struct
+{
+   addr_t addr;
+   mem_state_t m_state;
+   cmp_id_t owner;
+} cache_line_status_t;
+
+query_t stalled_query;
+bool is_busy, was_stalling;
+
+void push_stalled_query ()
+{
+   stalled_query.addr = transient_msg.addr_t_params[0];
+   stalled_query.cmd = transient_msg.cmd_id_t_param;
+   stalled_query.author = transient_msg.cmp_id_t_params[CMP_ID_T_EMITTER_PARAM];
+
+   is_ready_for_bus[ID] = FALSE;
+}
+
+void pop_stalled_query ()
+{
+   transient_msg.addr_t_params[0] = stalled_query.addr;
+   transient_msg.cmd_id_t_param = stalled_query.cmd;
+   transient_msg.cmp_id_t_params[CMP_ID_T_EMITTER_PARAM] = stalled_query.author;
+
+   stalled_query = DEFAULT_QUERY_VALUE;
+
+   is_ready_for_bus[ID] = FALSE;
+}
+
+
+void toggle_busy ()
+{
+   is_busy = !is_busy;
+   is_ready_for_bus[ID] = (stalled_query.addr == ADDR_T_NULL) &amp;&amp; !is_busy;
+}
+
+/******************************************************************************/
+/** Address Status Tracking Array Management **********************************/
+/******************************************************************************/
+/*
+ * Address status tracking array.
+ * MAX_AMOUNT_OF_CACHED_LINES ensures that even if every cache is full, all
+ * the addresses that are in them are correctly tracked.
+ */
+cache_line_status_t cache_line_status[MAX_AMOUNT_OF_CACHED_LINES];
+
+/* Line of the status tracking array relevant to the current operation. */
+cache_line_status_ix_t current_line = -1;
+
+/* Default value for a status tracking array line. */
+const cache_line_status_t DEFAULT_CACHE_LINE_STATUS_VALUE =
+   {
+      /* addr = */ ADDR_T_NULL,
+      /* c_state = */ /*[CMGR_DEFAULT_STATE]*/MEM_U/*[/CMGR_DEFAULT_STATE]*/,
+      /* owner = */ CMP_ID_T_NULL
+   };
+
+/**** Internal ****************************************************************/
+/*
+ * Returns the status tracking array line corresponding to a given address.
+ * If no such line exists, returns the first unused tracking array line.
+ *
+ * FIXME:
+ * I am assuming that returning "-1" (i.e. the status tracking array is full) is
+ * not possible, but that may be wrong.
+ */
+cache_line_status_ix_t get_line_of (const addr_t addr)
+{
+   int i;
+   int result;
+
+   result = -1;
+
+   /* Look at all the status tracking array lines */
+   for (i = 0; i &lt; MAX_AMOUNT_OF_CACHED_LINES; i++)
+   {
+      if (cache_line_status[i].addr == addr)
+      {
+         /* If we've found a match, we're done. */
+         return i;
+      }
+
+      if
+      (
+         (result == -1)
+         &amp;&amp; (cache_line_status[i].m_state == /*[CMGR_DEFAULT_STATE]*/MEM_U/*[/CMGR_DEFAULT_STATE]*/)
+      )
+      {
+         /*
+          * If no match has been found so far, and we've got an unused line,
+          * consider it to be were we'll store the new status.
+          */
+         result = i;
+      }
+   }
+
+   return result;
+}
+
+/**** Transitions *************************************************************/
+bool relevant_line_is (const mem_state_t m_state)
+{
+   return (cache_line_status[current_line].m_state == m_state);
+}
+
+void set_relevant_line_to (const mem_state_t m_state)
+{
+   cache_line_status[current_line].m_state = m_state;
+}
+
+/******************************************************************************/
+/** Communication Management **************************************************/
+/******************************************************************************/
+/* Copy of the transient message. */
+msg_content_t msg_in;
+
+/* Indicates that the "coherency manager" should send data as a reply. */
+bool should_act_flag = FALSE;
+
+/**** Internal ****************************************************************/
+/*[CMGR_HANDLE_QUERY_FUNCTIONS]*/
+/* Update function upon seeing a PutM query. */
+void handle_put_modified ()
+{
+   if (current_line == -1)
+   {
+      return;
+   }
+
+   if
+   (
+      cache_line_status[current_line].owner
+      != msg_in.cmp_id_t_params[CMP_ID_T_EMITTER_PARAM]
+   )
+   {
+      return;
+   }
+
+   if (cache_line_status[current_line].m_state == MEM_M)
+   {
+      cache_line_status[current_line].owner = CMP_ID_T_NULL;
+      cache_line_status[current_line].m_state = MEM_U_D;
+   }
+   else if (cache_line_status[current_line].m_state == MEM_U_D)
+   {
+      push_stalled_query();
+   }
+   else if (cache_line_status[current_line].m_state == MEM_U_D)
+   {
+      cache_line_status[current_line].owner = CMP_ID_T_NULL;
+      cache_line_status[current_line].m_state = MEM_U;
+   }
+}
+
+/* Update function upon seeing a GetM query. */
+void handle_get_modified ()
+{
+   if (relevant_line_is(MEM_U))
+   {
+      set_relevant_line_to(MEM_M);
+      should_act_flag = TRUE;
+
+      cache_line_status[current_line].owner =
+         msg_in.cmp_id_t_params[CMP_ID_T_EMITTER_PARAM];
+   }
+   else if (relevant_line_is(MEM_M))
+   {
+      cache_line_status[current_line].owner =
+         msg_in.cmp_id_t_params[CMP_ID_T_EMITTER_PARAM];
+   }
+   else if (relevant_line_is(MEM_U_D))
+   {
+      push_stalled_query();
+   }
+}
+
+/* Update function upon seeing a GetS query. */
+void handle_get_shared ()
+{
+   if (relevant_line_is(MEM_U))
+   {
+      should_act_flag = TRUE;
+   }
+   else if (relevant_line_is(MEM_M))
+   {
+      set_relevant_line_to(MEM_U_D);
+      cache_line_status[current_line].owner = CMP_ID_T_NULL;
+   }
+   else if (relevant_line_is(MEM_U_D))
+   {
+      push_stalled_query();
+   }
+   else if (relevant_line_is(MEM_U_B))
+   {
+      set_relevant_line_to(MEM_U);
+      cache_line_status[current_line].owner = CMP_ID_T_NULL;
+   }
+}
+
+/*[/CMGR_HANDLE_QUERY_FUNCTIONS]*/
+
+/**** Transitions *************************************************************/
+/*
+ * Returns the ID of the component that should receive replies to the query
+ * being handled.
+ */
+cmp_id_t get_emitter ()
+{
+    return msg_in.cmp_id_t_params[CMP_ID_T_EMITTER_PARAM];
+}
+
+/* Should the "coherency manager" provide a reply to the current query? */
+bool should_reply ()
+{
+   return should_act_flag;
+}
+
+bool should_write ()
+{
+   return should_act_flag;
+}
+
+void send_query_to_mem ()
+{
+   transient_msg = msg_in;
+}
+
+/*
+ * Copies a transient message and finds a line relevant to the address
+ * related to this message.
+ * The parameter is used to indicate if the transient message should be reset
+ * after the copy is made. Basically, it should be reset if, and only if, the
+ * message was directed only at this automaton (i.e. not broadcasted messages).
+ */
+void parse_message_content (const bool reset_transient)
+{
+   msg_in = transient_msg;
+
+   if (reset_transient)
+   {
+      reset_transient_msg();
+   }
+
+   current_line = get_line_of(msg_in.addr_t_params[0]);
+   cache_line_status[current_line].addr = msg_in.addr_t_params[0];
+}
+
+/* Parses and handles an incoming cache controller request. */
+void parse_request ()
+{
+   cmd_id_t req_in;
+
+   /*
+    * Copies the transient message to msg_in and sets the relevant line.
+    * "FALSE" -&gt; requests are broadcasted, so the transient message should *not*
+    *    be reset.
+    */
+   parse_message_content(FALSE);
+
+   req_in = msg_in.cmd_id_t_param;
+
+   /*[CMGR_QUERY_SWITCH]*/
+   if (req_in == CMD_CCTRL_GET_SHARED)
+   {
+      handle_get_shared();
+   }
+   else if (req_in == CMD_CCTRL_GET_MODIFIED)
+   {
+      handle_get_modified();
+   }
+   else if (req_in == CMD_CCTRL_PUT_MODIFIED)
+   {
+      handle_put_modified();
+   }
+   /*[/CMGR_QUERY_SWITCH]*/
+}
+
+/*[CMGR_HANDLE_DATA_FUNCTIONS]*/
+/*[/CMGR_HANDLE_DATA_FUNCTIONS]*/
+
+void parse_data_input ()
+{
+   cmd_id_t req_in;
+
+   parse_message_content(TRUE);
+
+   req_in = msg_in.cmd_id_t_param;
+
+   /*[CMGR_DATA_SWITCH]*/
+   if (relevant_line_is(MEM_M))
+   {
+      should_act_flag = TRUE;
+      set_relevant_line_to(MEM_U_B);
+   }
+   else if (relevant_line_is(MEM_U_D))
+   {
+      set_relevant_line_to(MEM_U);
+      should_act_flag = TRUE;
+   }
+
+   if (stalled_query.addr == cache_line_status[current_line].addr)
+   {
+      was_stalling = TRUE;
+   }
+   /*[/CMGR_DATA_SWITCH]*/
+}
+/******************************************************************************/
+/** Initialization ************************************************************/
+/******************************************************************************/
+/* Resets everything but the status tracking array to its default value. */
+void clean ()
+{
+    current_line = -1;
+    msg_in = DEFAULT_MSG;
+    should_act_flag = FALSE;
+}
+
+void initialize ()
+{
+   int i;
+
+   stalled_query = DEFAULT_QUERY_VALUE;
+   was_stalling = FALSE;
+   is_busy = FALSE;
+
+   for (i = 0; i &lt; MAX_AMOUNT_OF_CACHED_LINES; i++)
+   {
+      cache_line_status[i] = DEFAULT_CACHE_LINE_STATUS_VALUE;
+   }
+
+   clean();
+}
+
+</declaration>
+		<location id="id1" x="-340" y="-153">
+			<name x="-366" y="-145">S1</name>
+		</location>
+		<location id="id2" x="-25" y="-17">
+			<name x="-50" y="-42">S2</name>
+		</location>
+		<location id="id3" x="-493" y="-17">
+			<name x="-544" y="-8">Ready</name>
+		</location>
+		<location id="id4" x="-620" y="-17">
+			<name x="-612" y="-8">S0</name>
+			<committed/>
+		</location>
+		<init ref="id4"/>
+		<transition>
+			<source ref="id3"/>
+			<target ref="id2"/>
+			<label kind="guard" x="-170" y="-144">was_stalling</label>
+			<label kind="synchronisation" x="-170" y="-127">FORCE_URGENT!</label>
+			<label kind="assignment" x="-170" y="-110">pop_stalled_query(),
+parse_request(),
+toggle_busy(),
+was_stalling = FALSE</label>
+			<nail x="-187" y="-17"/>
+			<nail x="-187" y="-153"/>
+			<nail x="-25" y="-153"/>
+		</transition>
+		<transition>
+			<source ref="id1"/>
+			<target ref="id3"/>
+			<label kind="guard" x="-468" y="-110">!should_write()</label>
+			<label kind="synchronisation" x="-467" y="-93">FORCE_URGENT!</label>
+			<label kind="assignment" x="-467" y="-76">toggle_busy(),
+clean()</label>
+			<nail x="-340" y="-42"/>
+			<nail x="-493" y="-42"/>
+		</transition>
+		<transition>
+			<source ref="id1"/>
+			<target ref="id3"/>
+			<label kind="guard" x="-629" y="-161">should_write()</label>
+			<label kind="synchronisation" x="-629" y="-144">MEM_WRITE!</label>
+			<label kind="assignment" x="-629" y="-127">toggle_busy(),
+clean()</label>
+			<nail x="-501" y="-153"/>
+			<nail x="-501" y="-161"/>
+			<nail x="-637" y="-161"/>
+			<nail x="-637" y="-76"/>
+			<nail x="-493" y="-76"/>
+		</transition>
+		<transition>
+			<source ref="id2"/>
+			<target ref="id3"/>
+			<label kind="guard" x="-484" y="76">should_reply()</label>
+			<label kind="synchronisation" x="-484" y="93">MEM_READ!</label>
+			<label kind="assignment" x="-484" y="110">send_query_to_mem(),
+toggle_busy(),
+clean()</label>
+			<nail x="-25" y="76"/>
+			<nail x="-331" y="76"/>
+			<nail x="-331" y="161"/>
+			<nail x="-493" y="161"/>
+		</transition>
+		<transition>
+			<source ref="id2"/>
+			<target ref="id3"/>
+			<label kind="guard" x="-484" y="-1">!should_reply()</label>
+			<label kind="synchronisation" x="-485" y="16">FORCE_URGENT!</label>
+			<label kind="assignment" x="-484" y="33">toggle_busy(),
+clean()</label>
+			<nail x="-25" y="76"/>
+			<nail x="-493" y="76"/>
+		</transition>
+		<transition>
+			<source ref="id3"/>
+			<target ref="id2"/>
+			<label kind="synchronisation" x="-195" y="-8">QUERY_BROADCAST?</label>
+			<label kind="assignment" x="-195" y="8">parse_request(),
+toggle_busy()</label>
+		</transition>
+		<transition>
+			<source ref="id3"/>
+			<target ref="id1"/>
+			<label kind="guard" x="-323" y="-144">!was_stalling</label>
+			<label kind="synchronisation" x="-323" y="-127">DATA_IN[MEM_ID]?</label>
+			<label kind="assignment" x="-323" y="-110">parse_data_input(),
+toggle_busy()</label>
+			<nail x="-187" y="-17"/>
+			<nail x="-187" y="-153"/>
+		</transition>
+		<transition>
+			<source ref="id4"/>
+			<target ref="id3"/>
+			<label kind="synchronisation" x="-603" y="-68">SYS_INIT?</label>
+			<label kind="assignment" x="-603" y="-51">initialize(),
+clean()</label>
+		</transition>
+	</template>
+	<template>
+		<name>MemoryCTRL</name>
+		<parameter>cmp_id_t ID</parameter>
+		<declaration>
+/******************************************************************************/
+/** Time **********************************************************************/
+/******************************************************************************/
+/* Clock to measure time spent during a RAM access. */
+clock clk;
+cmp_id_t reply_to;
+cmd_id_t data_type;
+addr_t addr;
+
+void parse_query ()
+{
+    reply_to = transient_msg.cmp_id_t_params[CMP_ID_T_EMITTER_PARAM];
+    addr = transient_msg.addr_t_params[0];
+    data_type = transient_msg.cmd_id_t_param;
+}
+
+void initialize ()
+{
+    reply_to = CMP_ID_T_NULL;
+    addr = ADDR_T_NULL;
+    data_type = 0;
+}
+
+void emit_data ()
+{
+    transient_msg.cmp_id_t_params[CMP_ID_T_EMITTER_PARAM] = ID;
+    transient_msg.cmp_id_t_params[CMP_ID_T_RECEIVER_PARAM] = reply_to;
+    transient_msg.addr_t_params[0] = addr;
+    transient_msg.cmd_id_t_param = data_type;
+
+    initialize();
+}
+</declaration>
+		<location id="id5" x="-460" y="-102">
+			<name x="-476" y="-85">S0</name>
+		</location>
+		<location id="id6" x="-246" y="-34">
+			<name x="-229" y="-42">S2</name>
+		</location>
+		<location id="id7" x="-272" y="8">
+			<name x="-306" y="8">S1</name>
+			<label kind="invariant" x="-450" y="-8">clk &lt;= RAM_READ_TIME</label>
+		</location>
+		<location id="id8" x="-272" y="-187">
+			<name x="-306" y="-187">S3</name>
+			<label kind="invariant" x="-450" y="-204">clk &lt;= RAM_WRITE_TIME</label>
+		</location>
+		<location id="id9" x="-272" y="-102">
+			<name x="-323" y="-93">Ready</name>
+		</location>
+		<init ref="id5"/>
+		<transition>
+			<source ref="id5"/>
+			<target ref="id9"/>
+			<label kind="synchronisation" x="-442" y="-119">SYS_INIT?</label>
+			<label kind="assignment" x="-442" y="-102">initialize()</label>
+		</transition>
+		<transition>
+			<source ref="id6"/>
+			<target ref="id9"/>
+			<label kind="synchronisation" x="-238" y="-102">DATA_OUT[ID]!</label>
+			<label kind="assignment" x="-238" y="-85">emit_data(),
+is_ready_for_bus[ID] = TRUE</label>
+			<nail x="-246" y="-102"/>
+		</transition>
+		<transition>
+			<source ref="id8"/>
+			<target ref="id9"/>
+			<label kind="guard" x="-238" y="-178">(clk == RAM_WRITE_TIME)</label>
+			<label kind="synchronisation" x="-238" y="-161">MAX_PRIORITY!</label>
+			<label kind="assignment" x="-238" y="-144">is_ready_for_bus[ID] = TRUE</label>
+			<nail x="-246" y="-187"/>
+			<nail x="-246" y="-102"/>
+		</transition>
+		<transition>
+			<source ref="id7"/>
+			<target ref="id6"/>
+			<label kind="guard" x="-238" y="-25">(clk == RAM_READ_TIME)</label>
+			<label kind="synchronisation" x="-238" y="-8">MAX_PRIORITY!</label>
+			<nail x="-246" y="8"/>
+		</transition>
+		<transition>
+			<source ref="id9"/>
+			<target ref="id7"/>
+			<label kind="synchronisation" x="-365" y="-68">MEM_READ?</label>
+			<label kind="assignment" x="-467" y="-68">clk = 0,
+parse_query(),
+is_ready_for_bus[ID] = FALSE</label>
+		</transition>
+		<transition>
+			<source ref="id9"/>
+			<target ref="id8"/>
+			<label kind="synchronisation" x="-374" y="-170">MEM_WRITE?</label>
+			<label kind="assignment" x="-476" y="-153">clk = 0,
+is_ready_for_bus[ID] = FALSE</label>
+		</transition>
+	</template>
+	<template>
+		<name>QueryBus</name>
+		<parameter>cmp_id_t ID</parameter>
+		<declaration>
+/******************************************************************************/
+/** Types *********************************************************************/
+/******************************************************************************/
+
+/******************************************************************************/
+/** Local Data ****************************************************************/
+/******************************************************************************/
+
+/*
+ * Busses contain a copy of the messages passing through them. In this case,
+ * the content of the message is found in the "params" global variables, which
+ * must thus be copied here.
+ */
+msg_content_t msg;
+
+/* ID of the component that is currently master of the bus. */
+int owner;
+
+cmp_id_t bus_master_order[CORE_COUNT];
+
+/******************************************************************************/
+/** Transition Functions ******************************************************/
+/******************************************************************************/
+/* Stores a copy of the transient message. */
+void parse_message_content ()
+{
+   msg = transient_msg;
+   reset_transient_msg();
+}
+
+/* Writes its internal copy to the transient message. */
+void emit_message_content ()
+{
+   transient_msg = msg;
+   msg = DEFAULT_MSG;
+}
+
+/* Sets a new bus master according to the current transient message. */
+void set_bus_owner ()
+{
+   owner = transient_msg.cmp_id_t_params[CMP_ID_T_EMITTER_PARAM];
+   msg = transient_msg;
+   reset_transient_msg();
+}
+
+cmp_id_t get_owner ()
+{
+   return bus_master_order[owner];
+}
+
+bool order_selected ()
+{
+   return (owner == CORE_COUNT);
+}
+
+void add_bus_master ()
+{
+   bus_master_order[owner] = transient_msg.cmp_id_t_params[CMP_ID_T_EMITTER_PARAM];
+   owner += 1;
+}
+
+void select_next_master ()
+{
+   owner = ((owner + 1) % CORE_COUNT);
+}
+
+void initialize ()
+{
+   int i;
+
+   owner = 0;
+   DEFAULT_MSG.addr_t_params[0] = ADDR_T_NULL;
+   msg = DEFAULT_MSG;
+
+   reset_transient_msg();
+
+   for (i = 0; i &lt; CORE_COUNT; ++i)
+   {
+      bus_master_order[i] = ID;
+   }
+
+   for (i = 0; i &lt; COMPONENT_COUNT; ++i)
+   {
+      has_use_for_bus[i] = FALSE;
+      is_ready_for_bus[i] = TRUE;
+   }
+}
+
+bool something_needs_the_bus ()
+{
+   int i;
+
+   for (i = 0; i &lt; CORE_COUNT; ++i)
+   {
+      if (has_use_for_bus[bus_master_order[i]])
+      {
+         return TRUE;
+      }
+   }
+
+   return FALSE;
+}
+
+bool can_broadcast_message ()
+{
+   int i;
+
+   for (i = 0; i &lt; CORE_COUNT; ++i)
+   {
+      if (not is_ready_for_bus[bus_master_order[i]])
+      {
+         return FALSE;
+      }
+   }
+
+   return is_ready_for_bus[memory_component_for(msg.addr_t_params[0])];
+}
+
+
+</declaration>
+		<location id="id10" x="-1131" y="-637">
+			<name x="-1122" y="-629">S1</name>
+			<committed/>
+		</location>
+		<location id="id11" x="-994" y="-569">
+			<name x="-1003" y="-552">S2</name>
+		</location>
+		<location id="id12" x="-1233" y="-637">
+			<name x="-1216" y="-654">S0</name>
+			<committed/>
+		</location>
+		<location id="id13" x="-995" y="-662">
+			<name x="-1011" y="-654">Ready</name>
+		</location>
+		<init ref="id12"/>
+		<transition>
+			<source ref="id13"/>
+			<target ref="id13"/>
+			<label kind="guard" x="-960" y="-748">something_needs_the_bus()
+&amp;&amp; !has_use_for_bus[get_owner()]</label>
+			<label kind="synchronisation" x="-961" y="-713">FORCE_URGENT!</label>
+			<label kind="assignment" x="-961" y="-696">select_next_master()</label>
+			<nail x="-977" y="-697"/>
+			<nail x="-960" y="-671"/>
+		</transition>
+		<transition>
+			<source ref="id10"/>
+			<target ref="id10"/>
+			<label kind="synchronisation" x="-1233" y="-705">ADD_BUS_MASTER?</label>
+			<label kind="assignment" x="-1233" y="-688">add_bus_master()</label>
+			<nail x="-1156" y="-662"/>
+			<nail x="-1241" y="-662"/>
+			<nail x="-1241" y="-714"/>
+			<nail x="-1088" y="-714"/>
+			<nail x="-1088" y="-663"/>
+			<nail x="-1114" y="-663"/>
+		</transition>
+		<transition>
+			<source ref="id12"/>
+			<target ref="id10"/>
+			<label kind="assignment" x="-1216" y="-637">initialize()</label>
+		</transition>
+		<transition>
+			<source ref="id11"/>
+			<target ref="id13"/>
+			<label kind="guard" x="-1215" y="-603">can_broadcast_message()</label>
+			<label kind="synchronisation" x="-1215" y="-586">QUERY_BROADCAST!</label>
+			<label kind="assignment" x="-1215" y="-569">emit_message_content(),
+select_next_master()</label>
+			<nail x="-1037" y="-569"/>
+			<nail x="-1037" y="-663"/>
+		</transition>
+		<transition>
+			<source ref="id13"/>
+			<target ref="id11"/>
+			<label kind="synchronisation" x="-943" y="-595">QUERY_TO_BUS[get_owner()]?</label>
+			<label kind="assignment" x="-943" y="-578">parse_message_content()</label>
+			<nail x="-952" y="-663"/>
+			<nail x="-952" y="-569"/>
+		</transition>
+		<transition>
+			<source ref="id10"/>
+			<target ref="id13"/>
+			<label kind="guard" x="-1072" y="-747">order_selected()</label>
+			<label kind="synchronisation" x="-1071" y="-730">SYS_INIT!</label>
+			<label kind="assignment" x="-1071" y="-713">owner = 0</label>
+			<nail x="-1071" y="-637"/>
+			<nail x="-1071" y="-696"/>
+			<nail x="-995" y="-696"/>
+		</transition>
+	</template>
+	<template>
+		<name>DataFIFO</name>
+		<parameter>cmp_id_t OWNER_ID</parameter>
+		<declaration>const int IN_DATA_BUFFER_SIZE = 2;
+const int OUT_DATA_BUFFER_SIZE = IN_DATA_BUFFER_SIZE;
+const int MAX_DATA_BUFFER_SIZE = IN_DATA_BUFFER_SIZE;
+
+msg_content_t in_data[MAX_DATA_BUFFER_SIZE];
+msg_content_t out_data[MAX_DATA_BUFFER_SIZE];
+
+/**** Internal ****************************************************************/
+void pop
+(
+   msg_content_t &amp;array[MAX_DATA_BUFFER_SIZE],
+   const int queue_size
+)
+{
+   int i;
+
+   for (i = 1; i &lt; queue_size; ++i)
+   {
+      /* No "break" in UPPAAL. */
+      if (array[i - 1].addr_t_params[0] == ADDR_T_NULL)
+      {
+         array[i - 1] = array[i];
+         i = queue_size;
+      }
+      else
+      {
+         array[i - 1] = array[i];
+      }
+   }
+
+   array[queue_size - 1] = DEFAULT_MSG;
+   array[queue_size - 1].addr_t_params[0] = ADDR_T_NULL;
+}
+
+void push
+(
+   msg_content_t &amp;array[MAX_DATA_BUFFER_SIZE],
+   const int queue_size,
+   const msg_content_t msg
+)
+{
+   int i;
+
+   for (i = 0; i &lt; queue_size; ++i)
+   {
+      if (array[i].addr_t_params[0] == ADDR_T_NULL)
+      {
+         array[i] = msg;
+
+         return;
+      }
+   }
+}
+
+void push_data (msg_content_t &amp;array[MAX_DATA_BUFFER_SIZE], const int array_size)
+{
+   push(array, array_size, transient_msg);
+}
+
+void pop_data (msg_content_t &amp;array[MAX_DATA_BUFFER_SIZE], const int array_size)
+{
+   transient_msg = array[0];
+
+   pop(array, array_size);
+}
+
+/**** Transitions *************************************************************/
+cmp_id_t next_target ()
+{
+   return out_data[0].cmp_id_t_params[CMP_ID_T_RECEIVER_PARAM];
+}
+
+bool in_data_not_empty ()
+{
+   return (in_data[0].addr_t_params[0] != ADDR_T_NULL);
+}
+
+bool out_data_not_empty ()
+{
+   return (out_data[0].addr_t_params[0] != ADDR_T_NULL);
+}
+
+bool in_data_not_full ()
+{
+   return (in_data[IN_DATA_BUFFER_SIZE - 1].addr_t_params[0] == ADDR_T_NULL);
+}
+
+bool out_data_not_full ()
+{
+   return (out_data[OUT_DATA_BUFFER_SIZE - 1].addr_t_params[0] == ADDR_T_NULL);
+}
+
+void pop_in_data ()
+{
+   pop_data(in_data, IN_DATA_BUFFER_SIZE);
+}
+
+void pop_out_data ()
+{
+   pop_data(out_data, OUT_DATA_BUFFER_SIZE);
+}
+
+void push_in_data ()
+{
+   push_data(in_data, IN_DATA_BUFFER_SIZE);
+}
+
+void push_out_data ()
+{
+   push_data(out_data, OUT_DATA_BUFFER_SIZE);
+}
+
+void initialize ()
+{
+   int i;
+
+   for (i = 0; i &lt; MAX_DATA_BUFFER_SIZE; ++i)
+   {
+      in_data[i] = DEFAULT_MSG;
+      out_data[i] = DEFAULT_MSG;
+   }
+}
+</declaration>
+		<location id="id14" x="59" y="93">
+			<name x="25" y="84">S0</name>
+		</location>
+		<location id="id15" x="59" y="51">
+			<name x="8" y="25">Ready</name>
+		</location>
+		<init ref="id14"/>
+		<transition>
+			<source ref="id14"/>
+			<target ref="id15"/>
+			<label kind="synchronisation" x="76" y="68">SYS_INIT?</label>
+			<label kind="assignment" x="76" y="85">initialize()</label>
+		</transition>
+		<transition>
+			<source ref="id15"/>
+			<target ref="id15"/>
+			<label kind="guard" x="111" y="-76">out_data_not_empty()</label>
+			<label kind="synchronisation" x="68" y="-59">DATA_TRANS[next_target()]!</label>
+			<label kind="assignment" x="153" y="-42">pop_out_data()</label>
+			<nail x="255" y="51"/>
+			<nail x="255" y="-85"/>
+			<nail x="59" y="-85"/>
+		</transition>
+		<transition>
+			<source ref="id15"/>
+			<target ref="id15"/>
+			<label kind="guard" x="128" y="-8">out_data_not_full()</label>
+			<label kind="synchronisation" x="85" y="8">DATA_OUT[OWNER_ID]?</label>
+			<label kind="assignment" x="145" y="25">push_out_data()</label>
+			<nail x="255" y="51"/>
+			<nail x="255" y="-17"/>
+			<nail x="59" y="-17"/>
+		</transition>
+		<transition>
+			<source ref="id15"/>
+			<target ref="id15"/>
+			<label kind="guard" x="-136" y="-76">in_data_not_empty()</label>
+			<label kind="synchronisation" x="-136" y="-59">DATA_IN[OWNER_ID]!</label>
+			<label kind="assignment" x="-136" y="-42">pop_in_data()</label>
+			<nail x="-145" y="51"/>
+			<nail x="-145" y="-85"/>
+			<nail x="59" y="-85"/>
+		</transition>
+		<transition>
+			<source ref="id15"/>
+			<target ref="id15"/>
+			<label kind="guard" x="-136" y="-8">in_data_not_full()</label>
+			<label kind="synchronisation" x="-136" y="8">DATA_TRANS[OWNER_ID]?</label>
+			<label kind="assignment" x="-136" y="25">push_in_data()</label>
+			<nail x="-145" y="51"/>
+			<nail x="-145" y="-17"/>
+			<nail x="59" y="-17"/>
+		</transition>
+	</template>
+	<template>
+		<name>Core</name>
+		<parameter>cmp_id_t ID, cmp_id_t CCTRL, int PROGRAM</parameter>
+		<declaration>
+/******************************************************************************/
+/** Types *********************************************************************/
+/******************************************************************************/
+
+/*
+ * Instruction ID.
+ * ID of an 'assembly' instruction.
+ */
+typedef int[0,4] instr_id_t;
+
+/* Assembly program line. */
+typedef struct
+{
+   instr_id_t instr;
+   addr_t addr;
+   int min_calc_time;
+   int max_calc_time;
+} program_line_t;
+
+/******************************************************************************/
+/** Constants &amp; Limits ********************************************************/
+/******************************************************************************/
+/* Ends the program's execution */
+const instr_id_t INSTR_LOAD = 0;
+const instr_id_t INSTR_STORE = 1;
+const instr_id_t INSTR_EVICT = 2;
+
+const instr_id_t INSTR_END = 3;
+
+// Doesn't work, yet.
+const instr_id_t INSTR_CALC = 4;
+
+
+
+/******************************************************************************/
+/** Local Data ****************************************************************/
+/******************************************************************************/
+/* Used to measure computation times. */
+clock clk;
+clock runtime;
+
+/* Line of the program the execution is currently at. */
+int program_counter = 0;
+program_line_t current_program_line;
+int current_max_calc_time;
+int current_min_calc_time;
+
+int received_acks = 0;
+
+
+/**** Programs ****************************************************************/
+const program_line_t program_0 [7] =
+   {
+      {INSTR_LOAD,    1, 0, 0},
+      {INSTR_LOAD,    2, 0, 0},
+      {INSTR_STORE,   3, 0, 0},
+      {INSTR_LOAD,    3, 0, 0},
+      {INSTR_STORE,   1, 0, 0},
+      {INSTR_EVICT,   1, 0, 0},
+      {INSTR_END,     0, 0, 0}
+   };
+
+const program_line_t program_101 [7] =
+   {
+      {INSTR_LOAD,    4, 0, 0},
+      {INSTR_LOAD,    5, 0, 0},
+      {INSTR_STORE,   6, 0, 0},
+      {INSTR_LOAD,    6, 0, 0},
+      {INSTR_STORE,   4, 0, 0},
+      {INSTR_EVICT,   4, 0, 0},
+      {INSTR_END,     0, 0, 0}
+   };
+
+const program_line_t program_200 [11] =
+   {
+      {INSTR_STORE,   1, 0, 0},
+      {INSTR_STORE,   2, 0, 0},
+      {INSTR_LOAD,    1, 0, 0},
+      {INSTR_STORE,   1, 0, 0},
+
+//      {INSTR_CALC,    0, 200, 300},
+
+      {INSTR_LOAD,    2, 0, 0},
+      {INSTR_STORE,   2, 0, 0},
+      {INSTR_LOAD,    1, 0, 0},
+      {INSTR_STORE,   1, 0, 0},
+
+      {INSTR_LOAD,    2, 0, 0},
+      {INSTR_STORE,   2, 0, 0},
+      {INSTR_END,     0, 0, 0}
+   };
+
+const program_line_t program_201 [11] =
+   {
+      {INSTR_STORE,   3, 0, 0},
+      {INSTR_STORE,   4, 0, 0},
+      {INSTR_LOAD,    3, 0, 0},
+      {INSTR_STORE,   3, 0, 0},
+
+      {INSTR_LOAD,    4, 0, 0},
+      {INSTR_STORE,   4, 0, 0},
+      {INSTR_LOAD,    3, 0, 0},
+      {INSTR_STORE,   3, 0, 0},
+
+      {INSTR_LOAD,    4, 0, 0},
+      {INSTR_STORE,   4, 0, 0},
+      {INSTR_END,     0, 0, 0}
+   };
+
+
+const program_line_t program_102 [7] =
+   {
+      {INSTR_LOAD,    7, 0, 0},
+      {INSTR_LOAD,    8, 0, 0},
+      {INSTR_STORE,   9, 0, 0},
+      {INSTR_LOAD,    9, 0, 0},
+      {INSTR_STORE,   7, 0, 0},
+      {INSTR_EVICT,   7, 0, 0},
+      {INSTR_END,     0, 0, 0}
+   };
+
+const program_line_t program_103 [7] =
+   {
+      {INSTR_LOAD,    10, 0, 0},
+      {INSTR_LOAD,    11, 0, 0},
+      {INSTR_STORE,   12, 0, 0},
+      {INSTR_LOAD,    12, 0, 0},
+      {INSTR_STORE,   10, 0, 0},
+      {INSTR_EVICT,   10, 0, 0},
+      {INSTR_END,     0, 0, 0}
+   };
+
+const program_line_t program_1 [10] =
+   {
+      {INSTR_STORE,   1, 0, 0},
+
+      {INSTR_LOAD,    1, 0, 0},
+      {INSTR_EVICT,   1, 0, 0},
+      {INSTR_END,     0, 0, 0},
+
+      {INSTR_LOAD,    4, 0, 0},
+
+//      {INSTR_LOAD,    3, 0, 0},
+      {INSTR_LOAD,    1, 0, 0},
+      {INSTR_STORE,   2, 0, 0},
+      {INSTR_STORE,   1, 0, 0},
+
+      {INSTR_EVICT,   2, 0, 0},
+
+      {INSTR_END,     0, 0, 0}
+   };
+
+const program_line_t program_2 [10] =
+   {
+      {INSTR_LOAD,   1, 0, 0},
+      {INSTR_LOAD,   2, 0, 0},
+      {INSTR_LOAD,   3, 0, 0},
+      {INSTR_LOAD,   4, 0, 0},
+
+      {INSTR_LOAD,   5, 0, 0},
+      {INSTR_LOAD,   2, 0, 0},
+      {INSTR_LOAD,   4, 0, 0},
+
+      {INSTR_LOAD,   5, 0, 0},
+      {INSTR_LOAD,   1, 0, 0},
+
+      {INSTR_END,     0, 0, 0}
+   };
+
+const program_line_t program_3 [10] =
+   {
+      {INSTR_STORE,    1, 0, 0},
+      {INSTR_STORE,    2, 0, 0},
+      {INSTR_STORE,    3, 0, 0},
+      {INSTR_STORE,    4, 0, 0},
+
+      {INSTR_STORE,    5, 0, 0},
+      {INSTR_STORE,   2, 0, 0},
+      {INSTR_STORE,   4, 0, 0},
+      {INSTR_STORE,   5, 0, 0},
+
+      {INSTR_STORE,   1, 0, 0},
+
+      {INSTR_END,     0, 0, 0}
+   };
+
+const program_line_t program_4 [1] =
+   {
+      {INSTR_END,     0, 0, 0}
+   };
+
+const program_line_t program_10 [3] =
+   // Tests load and trivial evict
+   {
+      {INSTR_LOAD, 1, 0, 0}, // 1 RAM_READ_TIME
+      {INSTR_EVICT, 1, 0, 0},
+      {INSTR_END, 0, 0, 0}
+   };
+   // Total: 1 RAM_READ_TIME
+
+const program_line_t program_11 [5] =
+   {
+      {INSTR_STORE, 1, 0, 0}, // 1 RAM_READ_TIME*
+      {INSTR_LOAD, 1, 0, 0},
+      {INSTR_EVICT, 1, 0, 0},
+      {INSTR_LOAD, 1, 0, 0}, // 1 RAM_WRITE_TIME
+      {INSTR_END, 0, 0, 0}
+   };
+   // Total: 1 RAM_READ_TIME + 1 RAM_WRITE_TIME
+
+const program_line_t program_12 [5] =
+   // Tests that addresses don't get mixed up when validating existing
+   {
+      {INSTR_STORE, 1, 0, 0}, // 1 RAM_READ_TIME*
+      {INSTR_LOAD, 2, 0, 0}, // 1 RAM_READ_TIME
+      {INSTR_LOAD, 1, 0, 0},
+      {INSTR_STORE, 2, 0, 0}, // 1 RAM_READ_TIME
+      {INSTR_END, 0, 0, 0}
+   };
+   // Total: 3 RAM_READ_TIME
+
+const program_line_t program_13 [5] =
+   {
+      {INSTR_LOAD, 1, 0, 0}, // 1 RAM_READ_TIME
+      {INSTR_LOAD, 2, 0, 0}, // 1 RAM_READ_TIME
+      {INSTR_LOAD, 3, 0, 0}, // 1 RAM_READ_TIME
+      {INSTR_LOAD, 1, 0, 0},
+      {INSTR_END, 0, 0, 0}
+   };
+   // Total: 3 RAM_READ_TIME
+
+const program_line_t program_14 [8] =
+   {
+      {INSTR_LOAD, 1, 0, 0}, // 1 RAM_READ_TIME
+      {INSTR_LOAD, 2, 0, 0}, // 1 RAM_READ_TIME
+      {INSTR_LOAD, 3, 0, 0}, // 1 RAM_READ_TIME
+      {INSTR_LOAD, 4, 0, 0}, // 1 RAM_READ_TIME
+      {INSTR_LOAD, 1, 0, 0}, // 0: Available as soon as the first req is completed,
+                       // which is before the cache is full.
+      {INSTR_LOAD, 3, 0, 0},
+      {INSTR_LOAD, 4, 0, 0},
+      {INSTR_END, 0, 0, 0}
+   };
+   // 5 RAM_READ_TIME
+
+const program_line_t program_15 [11] =
+   {
+      {INSTR_LOAD, 1, 0, 0}, // 1 RAM_READ_TIME
+      {INSTR_LOAD, 2, 0, 0}, // 1 RAM_READ_TIME
+      {INSTR_LOAD, 3, 0, 0}, // 1 RAM_READ_TIME
+      {INSTR_LOAD, 4, 0, 0}, // 1 RAM_READ_TIME. @1 evicted
+
+      {INSTR_STORE, 2, 0, 0}, // 1 RAM_READ_TIME*
+      {INSTR_STORE, 3, 0, 0}, // 1 RAM_READ_TIME*
+      {INSTR_STORE, 4, 0, 0}, // 1 RAM_READ_TIME*
+      {INSTR_LOAD, 1, 0, 0}, /* 1 RAM_READ_TIME (+ 1 RAM_WRITE_TIME from @2[M]
+         eviction) */
+
+      {INSTR_LOAD, 3, 0, 0},
+      {INSTR_LOAD, 4, 0, 0},
+      {INSTR_END, 0, 0, 0}
+   };
+   // 8 RAM_READ_TIME + 1 RAM_WRITE_TIME
+
+const program_line_t program_16 [4] =
+   {
+      {INSTR_LOAD, 1, 0, 0}, // 1 RAM_READ_TIME
+      {INSTR_STORE, 1, 0, 0}, // 1 RAM_READ_TIME
+      {INSTR_EVICT, 1, 0, 0}, // 1 RAM_WRITE_TIME
+      {INSTR_END, 0, 0, 0}
+   };
+   // 2 RAM_READ_TIME + 1 RAM_WRITE_TIME
+
+
+/******************************************************************************/
+/** Local Functions ***********************************************************/
+/******************************************************************************/
+/*
+ * Converts an 'instr_id_t' to an 'cmd_id_t', if applicable (i.e. mem and cache
+ * related instructions).
+ */
+cmd_id_t instr_to_cmd (const instr_id_t instr)
+{
+   if (instr == INSTR_LOAD)
+   {
+      return /*[CMD_CCTRL_LOAD]*/CMD_CCTRL_LOAD/*[/CMD_CCTRL_LOAD]*/;
+   }
+   else if (instr == INSTR_STORE)
+   {
+      return /*[CMD_CCTRL_STORE]*/CMD_CCTRL_STORE/*[/CMD_CCTRL_STORE]*/;
+   }
+   else if (instr == INSTR_EVICT)
+   {
+      return /*[CMD_CCTRL_EVICT]*/CMD_CCTRL_EVICT/*[/CMD_CCTRL_EVICT]*/;
+   }
+   else
+   {
+      return /*[CMD_CCTRL_EVICT]*/CMD_CCTRL_EVICT/*[/CMD_CCTRL_EVICT]*/;
+   }
+}
+
+instr_id_t cmd_to_instr (const cmd_id_t cmd)
+{
+   if (cmd == /*[CMD_CCTRL_LOAD]*/CMD_CCTRL_LOAD/*[/CMD_CCTRL_LOAD]*/)
+   {
+      return INSTR_LOAD;
+   }
+   else if (cmd == /*[CMD_CCTRL_STORE]*/CMD_CCTRL_STORE/*[/CMD_CCTRL_STORE]*/)
+   {
+      return INSTR_STORE;
+   }
+   else if (cmd == /*[CMD_CCTRL_EVICT]*/CMD_CCTRL_EVICT/*[/CMD_CCTRL_EVICT]*/)
+   {
+      return INSTR_EVICT;
+   }
+   else
+   {
+      return INSTR_END;
+   }
+}
+
+/* Returns the current program line for this automaton. */
+program_line_t get_current_program_line ()
+{
+   if (PROGRAM == 0)
+   {
+      return program_0[program_counter];
+   }
+   else if (PROGRAM == 1)
+   {
+      return program_1[program_counter];
+   }
+   else if (PROGRAM == 2)
+   {
+      return program_2[program_counter];
+   }
+   else if (PROGRAM == 3)
+   {
+      return program_3[program_counter];
+   }
+   else if (PROGRAM == 4)
+   {
+      return program_4[program_counter];
+   }
+   else if (PROGRAM == 10)
+   {
+      return program_10[program_counter];
+   }
+   else if (PROGRAM == 11)
+   {
+      return program_11[program_counter];
+   }
+   else if (PROGRAM == 12)
+   {
+      return program_12[program_counter];
+   }
+   else if (PROGRAM == 13)
+   {
+      return program_13[program_counter];
+   }
+   else if (PROGRAM == 14)
+   {
+      return program_14[program_counter];
+   }
+   else if (PROGRAM == 15)
+   {
+      return program_15[program_counter];
+   }
+   else if (PROGRAM == 16)
+   {
+      return program_16[program_counter];
+   }
+   else if (PROGRAM == 101)
+   {
+      return program_101[program_counter];
+   }
+   else if (PROGRAM == 102)
+   {
+      return program_102[program_counter];
+   }
+   else if (PROGRAM == 103)
+   {
+      return program_103[program_counter];
+   }
+   else if (PROGRAM == 200)
+   {
+      return program_200[program_counter];
+   }
+   else if (PROGRAM == 201)
+   {
+      return program_201[program_counter];
+   }
+   else
+   {
+      return program_4[program_counter];
+   }
+}
+
+/******************************************************************************/
+/** Transition Functions ******************************************************/
+/******************************************************************************/
+/** Instruction ***************************************************************/
+void load_next_instruction ()
+{;
+    program_counter += 1;
+    current_program_line = get_current_program_line();
+    current_max_calc_time = current_program_line.max_calc_time;
+    current_min_calc_time = current_program_line.min_calc_time;
+}
+
+bool next_instruction_is_to_be_sent ()
+{
+   if (!USE_LOCK_FREE_CACHES &amp;&amp; (received_acks != program_counter))
+   {
+      return FALSE;
+   }
+
+   return
+      (
+         (current_program_line.instr == INSTR_LOAD)
+         || (current_program_line.instr == INSTR_STORE)
+         || (current_program_line.instr == INSTR_EVICT)
+      );
+}
+
+bool next_instruction_is (const instr_id_t instr)
+{
+   return (current_program_line.instr == instr);
+}
+
+/** Message Passing ***********************************************************/
+/*
+ * Modifies the transient message to match the current instruction, then
+ * advances the program counter.
+ */
+void emit_next_instruction ()
+{
+   transient_msg.cmp_id_t_params[CMP_ID_T_EMITTER_PARAM] = ID;
+   transient_msg.cmd_id_t_param = instr_to_cmd(current_program_line.instr);
+   transient_msg.addr_t_params[0] = current_program_line.addr;
+
+   load_next_instruction();
+}
+
+
+/******************************************************************************/
+/** Initialization ************************************************************/
+/******************************************************************************/
+
+void initialize ()
+{
+   current_program_line = get_current_program_line();
+}
+
+</declaration>
+		<location id="id16" x="-1479" y="-1113">
+			<name x="-1470" y="-1105">S1</name>
+			<label kind="invariant" x="-1462" y="-1122">clk &lt;= CLOCK_CYCLE_TIME</label>
+		</location>
+		<location id="id17" x="-1530" y="-909">
+			<name x="-1513" y="-918">Terminated</name>
+		</location>
+		<location id="id18" x="-1657" y="-1011">
+			<name x="-1691" y="-1019">S0</name>
+		</location>
+		<location id="id19" x="-1479" y="-1011">
+			<name x="-1462" y="-1028">Ready</name>
+		</location>
+		<init ref="id18"/>
+		<transition>
+			<source ref="id16"/>
+			<target ref="id19"/>
+			<label kind="guard" x="-1470" y="-1088">(clk == CLOCK_CYCLE_TIME)</label>
+			<label kind="synchronisation" x="-1470" y="-1071">MAX_PRIORITY!</label>
+			<label kind="assignment" x="-1470" y="-1054">clk = 0</label>
+		</transition>
+		<transition>
+			<source ref="id19"/>
+			<target ref="id17"/>
+			<label kind="guard" x="-1683" y="-961">next_instruction_is(INSTR_END)
+&amp;&amp; (received_acks == program_counter)</label>
+			<label kind="synchronisation" x="-1682" y="-928">FORCE_URGENT!</label>
+			<nail x="-1479" y="-969"/>
+			<nail x="-1691" y="-969"/>
+			<nail x="-1691" y="-901"/>
+			<nail x="-1572" y="-901"/>
+		</transition>
+		<transition>
+			<source ref="id19"/>
+			<target ref="id19"/>
+			<label kind="synchronisation" x="-1419" y="-1003">CPU_ACK[ID]?</label>
+			<label kind="assignment" x="-1419" y="-986">received_acks += 1</label>
+			<nail x="-1428" y="-1003"/>
+			<nail x="-1428" y="-977"/>
+		</transition>
+		<transition>
+			<source ref="id19"/>
+			<target ref="id16"/>
+			<label kind="guard" x="-1700" y="-1105">next_instruction_is_to_be_sent()</label>
+			<label kind="synchronisation" x="-1700" y="-1088">CPU_REQ[CCTRL]!</label>
+			<label kind="assignment" x="-1700" y="-1071">emit_next_instruction(),
+clk = 0</label>
+			<nail x="-1504" y="-1037"/>
+			<nail x="-1708" y="-1037"/>
+			<nail x="-1708" y="-1113"/>
+		</transition>
+		<transition>
+			<source ref="id18"/>
+			<target ref="id19"/>
+			<label kind="synchronisation" x="-1581" y="-1028">SYS_INIT?</label>
+			<label kind="assignment" x="-1581" y="-1011">runtime = 0,
+initialize()</label>
+		</transition>
+	</template>
+	<template>
+		<name>MSICacheCTRL</name>
+		<parameter>cmp_id_t ID, cmp_id_t MEM_ID</parameter>
+		<declaration>clock clk;
+
+/******************************************************************************/
+/** Types *********************************************************************/
+/******************************************************************************/
+
+/*
+ * Number of requests a cache controller can buffer before stalling.
+ * Note that in the current implementation, one request buffer line is reserved
+ * for the cache controller's own use (for when it needs to do an eviction).
+ * As a result, a REQ_BUFFER_SIZE of at least 2 is required.
+ */
+const int REQ_BUFFER_SIZE = 3;
+
+/* Index of a line in the requests buffer. */
+typedef int[-1,REQ_BUFFER_SIZE] pending_request_ix_t;
+
+/* Index of a cache line. */
+typedef int[-1,LINES_PER_CACHE] cache_line_ix_t;
+
+/* Rank of a cache line in the LRU order. */
+typedef int[0,LINES_PER_CACHE] cache_line_last_use_t;
+
+/* Status of a cache line. */
+typedef int[0,/*[CC_STATES_COUNT]*/20/*[/CC_STATES_COUNT]*/] msi_state_t;
+
+/*[CC_STATES_DECLARATION]*/
+const msi_state_t MSI_MODIFIED = 0;
+const msi_state_t MSI_SHARED = 1;
+const msi_state_t MSI_INVALID = 2;
+
+const msi_state_t MSI_IS_BD = 3;
+const msi_state_t MSI_IS_B = 4;
+const msi_state_t MSI_IS_D = 5;
+const msi_state_t MSI_IS_D_I = 6;
+
+const msi_state_t MSI_SM_BD = 7;
+const msi_state_t MSI_SM_B = 8;
+const msi_state_t MSI_SM_D = 9;
+const msi_state_t MSI_SM_D_I = 10;
+const msi_state_t MSI_SM_D_S = 11;
+const msi_state_t MSI_SM_D_SI = 12;
+
+const msi_state_t MSI_IM_BD = 13;
+const msi_state_t MSI_IM_B = 14;
+const msi_state_t MSI_IM_D = 15;
+const msi_state_t MSI_IM_D_I = 16;
+const msi_state_t MSI_IM_D_S = 17;
+const msi_state_t MSI_IM_D_SI = 18;
+
+/* Evict from Modified. */
+const msi_state_t MSI_MI_B = 19;
+/* Evict from Modified, but another cache controller is getting Modified. */
+const msi_state_t MSI_II_B = 20;
+/*[/CC_STATES_DECLARATION]*/
+
+typedef struct
+{
+   /* Address this line represents. */
+   addr_t addr;
+
+   /* Status associated to the address. */
+   msi_state_t c_state;
+
+   /* Rank of the cache line in the LRU order. */
+   cache_line_last_use_t last_use;
+
+   /* If the state is AA_B(B?)_C(C?), this is who to send the reply to. */
+   cmp_id_t reply_to;
+} cache_line_t;
+
+typedef struct
+{
+   /* ID of the component the acknowledgment will be sent to. */
+   cmp_id_t requester;
+
+   /* Address on which the request is made. */
+   addr_t addr;
+
+   /* Type of request. */
+   cmd_id_t cmd;
+
+   bool is_cache_hit;
+} pending_request_t;
+
+typedef struct
+{
+    int hit;
+    int miss;
+    int interference_count[INTERFERENCE_TYPES];
+    int potential_interference_count[INTERFERENCE_TYPES];
+    bool is_being[INTERFERENCE_TYPES];
+} cache_local_address_info_t;
+
+query_t current_query;
+
+/******************************************************************************/
+/** Cache Status Management ***************************************************/
+/******************************************************************************/
+/* The actual cache... */
+cache_line_t cache_lines[LINES_PER_CACHE];
+
+/* Line of the cache associated with the current operation. */
+cache_line_ix_t current_line = -1;
+
+const cache_line_t DEFAULT_CACHE_LINE_VALUE =
+   {
+      /* addr = */ ADDR_T_NULL,
+      /* c_state = */ /*[CC_DEFAULT_STATE]*/MSI_INVALID/*[/CC_DEFAULT_STATE]*/,
+      /* last_use = */ 0,
+      /* reply_to = */ CMP_ID_T_NULL
+   };
+
+/**** Internal ****************************************************************/
+/*
+ * Returns the index of the cache line associated to an address.
+ * If there is no such line, the index of a currently unused line is returned.
+ * Otherwise, returns -1. This is an actual possibility: if the cache is full
+ * and a query about an address not in the cache traverses the bus, -1 would
+ * be returned.
+ */
+cache_line_ix_t get_line_of (const addr_t addr, const cache_line_t &amp;cache[LINES_PER_CACHE])
+{
+   int i;
+   int result;
+
+   result = -1;
+
+   /* Traverse the cache... */
+   for (i = 0; i &lt; LINES_PER_CACHE; i++)
+   {
+      /* If there's an cache line about the targeted address, we're done. */
+      if (cache[i].addr == addr)
+      {
+         return i;
+      }
+
+      /*
+       * If we don't already have a result, and there's an empty line, consider
+       * the result to be this empty line for now.
+       */
+      if
+      (
+         (result == -1)
+         &amp;&amp;
+         (cache[i].c_state == /*[CC_DEFAULT_STATE]*/MSI_INVALID/*[/CC_DEFAULT_STATE]*/)
+      )
+      {
+         result = i;
+      }
+   }
+
+   return result;
+}
+
+/* Returns the state of the relevant line, or MSI_INVALID if there isn't one. */
+msi_state_t get_state_of_relevant_line ()
+{
+   if (current_line == -1)
+   {
+      return /*[CC_DEFAULT_STATE]*/MSI_INVALID/*[/CC_DEFAULT_STATE]*/;
+   }
+
+   return cache_lines[current_line].c_state;
+}
+
+msi_state_t get_state_of (const addr_t addr, const cache_line_t &amp;cache[LINES_PER_CACHE])
+{
+   const cache_line_ix_t result_ix = get_line_of(addr, cache);
+
+   if (result_ix == -1)
+   {
+      return /*[CC_DEFAULT_STATE]*/MSI_INVALID/*[/CC_DEFAULT_STATE]*/;
+   }
+
+   return cache[result_ix].c_state;
+}
+
+/**** Transitions *************************************************************/
+/* Tests if the relevant line has the given status. */
+bool relevant_line_is (const msi_state_t i_state)
+{
+   return (get_state_of_relevant_line() == i_state);
+}
+
+void set_line_to (const cache_line_ix_t line, const msi_state_t i_state)
+{
+   if (i_state == /*[CC_DEFAULT_STATE]*/MSI_INVALID/*[/CC_DEFAULT_STATE]*/)
+   {
+      cache_lines[line].reply_to = CMP_ID_T_NULL;
+   }
+
+   cache_lines[line].c_state = i_state;
+}
+
+/* Sets the status of the relevant line to the given status. */
+void set_relevant_line_to (const msi_state_t i_state)
+{
+   set_line_to(current_line, i_state);
+}
+
+/******************************************************************************/
+/** Cache Request Info ********************************************************/
+/******************************************************************************/
+cache_local_address_info_t cache_local_address_infos[LAST_ADDR];
+
+void mark_as_being (const interference_id_t interference)
+{
+   const addr_t addr = cache_lines[current_line].addr;
+
+   cache_local_address_infos[addr].potential_interference_count[INTERFERENCE_MINOR] -= 1;
+   cache_local_address_infos[addr].potential_interference_count[interference] += 1;
+   cache_local_address_infos[addr].is_being[interference] = TRUE;
+}
+
+void clear_interference_by_reading ()
+{
+   const addr_t addr = cache_lines[current_line].addr;
+
+   if (cache_local_address_infos[addr].is_being[INTERFERENCE_EXPELLING])
+   {
+      cache_local_address_infos[addr].is_being[INTERFERENCE_EXPELLING] = FALSE;
+      cache_local_address_infos[addr].interference_count[INTERFERENCE_EXPELLING] += 1;
+   }
+}
+
+void clear_interference_by_writing ()
+{
+   const addr_t addr = cache_lines[current_line].addr;
+
+   if (cache_local_address_infos[addr].is_being[INTERFERENCE_EXPELLING])
+   {
+      cache_local_address_infos[addr].is_being[INTERFERENCE_EXPELLING] = FALSE;
+      cache_local_address_infos[addr].interference_count[INTERFERENCE_EXPELLING] += 1;
+   }
+
+   if (cache_local_address_infos[addr].is_being[INTERFERENCE_DEMOTING])
+   {
+      cache_local_address_infos[addr].is_being[INTERFERENCE_DEMOTING] = FALSE;
+      cache_local_address_infos[addr].interference_count[INTERFERENCE_DEMOTING] += 1;
+   }
+}
+
+/******************************************************************************/
+/** Eviction Management *******************************************************/
+/******************************************************************************/
+cache_line_ix_t least_recently_used_line = (LINES_PER_CACHE - 1);
+
+/**** Internal ****************************************************************/
+void propagate_use_count (const cache_line_ix_t line_being_used)
+{
+   cache_line_last_use_t threshold;
+   int i;
+
+   threshold = cache_lines[line_being_used].last_use;
+
+   for (i = 0; i &lt; LINES_PER_CACHE; i++)
+   {
+      if (cache_lines[i].last_use &lt; threshold)
+      {
+         cache_lines[i].last_use += 1;
+      }
+
+      if
+      (
+         (cache_lines[i].last_use == (LINES_PER_CACHE - 1))
+         &amp;&amp; (i != line_being_used)
+      )
+      {
+         least_recently_used_line = i;
+      }
+   }
+
+   cache_lines[line_being_used].last_use = 0;
+}
+
+/******************************************************************************/
+/** CPU Request Management ****************************************************/
+/******************************************************************************/
+/*
+ * Stalled, active, and completed (but not yet acknowledged) requests.
+ * These requests are stored in a FIFO order.
+ */
+pending_request_t pending_requests[REQ_BUFFER_SIZE];
+pending_request_t completed_requests[REQ_BUFFER_SIZE];
+pending_request_t blocked_request;
+
+/* Index of the request related to the current operation. */
+pending_request_ix_t current_request = -1;
+
+const pending_request_t DEFAULT_PENDING_REQUEST_VALUE =
+   {
+      /* requester = */  0,
+      /* addr = */ ADDR_T_NULL,
+      /* cmd = */ 0,
+      /* is_cache_hit = */ TRUE
+   };
+
+/**** Internal ****************************************************************/
+/*
+ * Bypasses the FIFO order of 'pending_requests' to ensure that the given
+ * request is the next one to go.
+ * Currently, the only user would be the internal eviction mechanism.
+ */
+void force_first_pending_request
+(
+   pending_request_t &amp;array[REQ_BUFFER_SIZE],
+   const int queue_size,
+   const pending_request_t request
+)
+{
+   int i;
+
+   /* Move back one cell every request. */
+   /* Safe due to pending_requests[REQ_BUFFER_SIZE - 1] being reserved. */
+   for (i = queue_size; i &gt; 0; --i)
+   {
+      array[i] = array[i - 1];
+   }
+
+   array[0] = request;
+}
+
+/* Adds a request to 'pending_requests' while maintaining the FIFO order. */
+void push_new_pending_request
+(
+   pending_request_t &amp;array[REQ_BUFFER_SIZE],
+   const int queue_size,
+   const pending_request_t request
+)
+{
+   int i;
+
+   /* Puts the request in the first free pending request slot found. */
+   for (i = 0; i &lt; queue_size; ++i)
+   {
+      if (array[i].addr == ADDR_T_NULL)
+      {
+         array[i] = request;
+
+         return;
+      }
+   }
+}
+
+void pop_pending_request_at
+(
+   pending_request_t &amp;array[REQ_BUFFER_SIZE],
+   const int queue_size,
+   const pending_request_ix_t request_ix
+)
+{
+   int i;
+
+   for (i = (request_ix + 1); i &lt; queue_size; ++i)
+   {
+      array[i - 1] = array[i];
+
+      if (array[i - 1].addr == ADDR_T_NULL)
+      {
+         i = queue_size;
+      }
+   }
+
+   array[queue_size - 1] = DEFAULT_PENDING_REQUEST_VALUE;
+}
+
+void mark_current_pending_request_as_cache_miss ()
+{
+   pending_requests[current_request].is_cache_hit = FALSE;
+}
+
+void mark_request_as_completed ()
+{
+   const pending_request_t req = pending_requests[current_request];
+
+   if (req.is_cache_hit)
+   {
+      cache_local_address_infos[req.addr].miss += 1;
+   }
+   else
+   {
+      cache_local_address_infos[req.addr].miss += 1;
+   }
+
+   pop_pending_request_at
+   (
+      pending_requests,
+      REQ_BUFFER_SIZE,
+      current_request
+   );
+
+   push_new_pending_request
+   (
+      completed_requests,
+      REQ_BUFFER_SIZE,
+      req
+   );
+}
+
+/* Is the requests buffer full? */
+bool can_take_requests ()
+{
+   /*
+    * There is at least one free available line in the 'current_request'
+    * FIFO (note that [REQ_BUFFER_SIZE - 1] is reserved).
+    */
+   return
+      (
+         (pending_requests[REQ_BUFFER_SIZE - 2].addr == ADDR_T_NULL)
+         &amp;&amp; (blocked_request.addr == ADDR_T_NULL)
+      );
+}
+
+bool has_pending_request ()
+{
+    return (pending_requests[0].addr != ADDR_T_NULL);
+}
+
+bool has_completed_request ()
+{
+    return (completed_requests[0].addr != ADDR_T_NULL);
+}
+
+/*[CC_HANDLE_STALLED_REQUEST]*/
+/* Handles a previously stalled EVICT request becoming active. */
+void handle_stalled_evict ()
+{
+   /** [TEST][HANDLE_STALLED_EVICT] **/
+   if (relevant_line_is(MSI_INVALID))
+   {
+      mark_request_as_completed();
+   }
+   else if (relevant_line_is(MSI_SHARED))
+   {
+      mark_request_as_completed();
+      set_relevant_line_to(MSI_INVALID);
+   }
+   else if (relevant_line_is(MSI_MODIFIED))
+   {
+      mark_current_pending_request_as_cache_miss();
+
+
+      current_query.author = ID;
+      current_query.addr = cache_lines[current_line].addr;
+      current_query.cmd = CMD_CCTRL_PUT_MODIFIED;
+
+      set_relevant_line_to(MSI_MI_B);
+      current_request += 1;
+   }
+}
+
+/* Handles a previously stalled STORE request becoming active. */
+void handle_stalled_store ()
+{
+   /** [TEST][HANDLE_STALLED_STORE] **/
+   if (relevant_line_is(MSI_INVALID))
+   {
+      mark_current_pending_request_as_cache_miss();
+      clear_interference_by_writing();
+      propagate_use_count(current_line);
+
+
+      current_query.author = ID;
+      current_query.addr = cache_lines[current_line].addr;
+      current_query.cmd = CMD_CCTRL_GET_MODIFIED;
+
+      set_relevant_line_to(MSI_IM_BD);
+      current_request += 1;
+   }
+   else if (relevant_line_is(MSI_SHARED))
+   {
+      mark_current_pending_request_as_cache_miss();
+      clear_interference_by_writing();
+      propagate_use_count(current_line);
+
+      current_query.author = ID;
+      current_query.addr = cache_lines[current_line].addr;
+      current_query.cmd = CMD_CCTRL_GET_MODIFIED;
+
+      set_relevant_line_to(MSI_SM_BD);
+
+      current_request += 1;
+   }
+   else if
+   (
+      relevant_line_is(MSI_MODIFIED)
+      || relevant_line_is(MSI_MI_B)
+   )
+   {
+      clear_interference_by_writing();
+      propagate_use_count(current_line);
+
+      mark_request_as_completed();
+   }
+}
+
+/* Handles a previously stalled LOAD request becoming active. */
+void handle_stalled_load ()
+{
+   /** [TEST][HANDLE_STALLED_LOAD] **/
+   if (relevant_line_is(MSI_INVALID))
+   {
+      mark_current_pending_request_as_cache_miss();
+      clear_interference_by_reading();
+      propagate_use_count(current_line);
+
+
+      current_query.author = ID;
+      current_query.addr = cache_lines[current_line].addr;
+      current_query.cmd = CMD_CCTRL_GET_SHARED;
+
+      set_relevant_line_to(MSI_IS_BD);
+      current_request += 1;
+   }
+   else if
+   (
+      relevant_line_is(MSI_SHARED)
+      || relevant_line_is(MSI_SM_BD)
+      || relevant_line_is(MSI_SM_D)
+      || relevant_line_is(MSI_SM_B)
+      || relevant_line_is(MSI_SM_D_I)
+      || relevant_line_is(MSI_SM_D_S)
+      || relevant_line_is(MSI_SM_D_SI)
+      || relevant_line_is(MSI_MODIFIED)
+      || relevant_line_is(MSI_MI_B)
+   )
+   {
+      /*
+       * It's actually a bit more complicated than that: all the MSI_SM_* are
+       * cache hits on the value BEFORE the write occurs...
+       */
+      clear_interference_by_reading();
+      propagate_use_count(current_line);
+
+      mark_request_as_completed();
+   }
+}
+/*[/CC_HANDLE_STALLED_REQUEST]*/
+
+/*[CC_TEST_UNSTALLS_REQUEST]*/
+bool unstalls_evict ()
+{
+   /** [TEST][UNSTALLS_EVICT] **/
+   return
+      (
+         relevant_line_is(MSI_MODIFIED)
+         || relevant_line_is(MSI_INVALID)
+         || relevant_line_is(MSI_SHARED)
+      );
+}
+
+bool unstalls_load ()
+{
+   /** [TEST][UNSTALLS_LOAD] **/
+   return
+      (
+         relevant_line_is(MSI_INVALID)
+         || relevant_line_is(MSI_SHARED)
+         || relevant_line_is(MSI_SM_BD)
+         || relevant_line_is(MSI_SM_B)
+         || relevant_line_is(MSI_SM_D)
+         || relevant_line_is(MSI_SM_D_S)
+         || relevant_line_is(MSI_SM_D_I)
+         || relevant_line_is(MSI_SM_D_SI)
+         || relevant_line_is(MSI_MODIFIED)
+         || relevant_line_is(MSI_MI_B)
+      );
+}
+
+bool unstalls_store ()
+{
+   /** [TEST][UNSTALLS_STORE] **/
+   return
+      (
+         relevant_line_is(MSI_INVALID)
+         || relevant_line_is(MSI_SHARED)
+         || relevant_line_is(MSI_MODIFIED)
+         || relevant_line_is(MSI_MI_B)
+      );
+}
+
+/*[/CC_TEST_UNSTALLS_REQUEST]*/
+
+bool should_unstall ()
+{
+   cmd_id_t cmd;
+
+   if (current_request == -1)
+   {
+      return FALSE;
+   }
+
+   cmd = pending_requests[current_request].cmd;
+
+   return
+      (
+         /*[CC_TEST_UNSTALLS_REQUEST_SWITCH]*/
+         ((cmd == CMD_CCTRL_EVICT) &amp;&amp; unstalls_evict())
+         || ((cmd == CMD_CCTRL_LOAD) &amp;&amp; unstalls_load())
+         || ((cmd == CMD_CCTRL_STORE) &amp;&amp; unstalls_store())
+         /*[/CC_TEST_UNSTALLS_REQUEST_SWITCH]*/
+      );
+}
+
+/* Handles the activation of a previously stalled request. */
+void handle_unstalling ()
+{
+   const cmd_id_t cmd = pending_requests[current_request].cmd;
+
+   /*[CC_UNSTALL_REQUEST_SWITCH]*/
+   if (cmd == CMD_CCTRL_LOAD)
+   {
+      handle_stalled_load();
+   }
+   else if (cmd == CMD_CCTRL_STORE)
+   {
+      handle_stalled_store();
+   }
+   else if (cmd == CMD_CCTRL_EVICT)
+   {
+      handle_stalled_evict();
+   }
+   /*[/CC_UNSTALL_REQUEST_SWITCH]*/
+}
+
+void load_next_relevant_request (const addr_t relevant_addr)
+{
+   int i;
+
+   if (current_request == -1)
+   {
+      return;
+   }
+
+    for (i = current_request; i &lt; REQ_BUFFER_SIZE; ++i)
+    {
+        if (pending_requests[i].addr == ADDR_T_NULL)
+        {
+            current_request = -1;
+
+            return;
+        }
+
+        if (pending_requests[i].addr == relevant_addr)
+        {
+            current_request = i;
+
+            return;
+        }
+    }
+
+    current_request = -1;
+}
+
+void load_first_request_for (const cmd_id_t cmd, const addr_t addr)
+{
+   int i;
+
+   current_request = 0;
+
+   if
+   (
+      (pending_requests[0].addr == addr)
+      &amp;&amp; (pending_requests[0].cmd == /*[CMD_CCTRL_EVICT]*/CMD_CCTRL_EVICT/*[/CMD_CCTRL_EVICT]*/)
+   )
+   {
+      // Possible race condition with the eviction policy, ignore this req.
+      current_request = 1;
+   }
+
+   for (i = current_request; i &lt; REQ_BUFFER_SIZE; ++i)
+   {
+      if (pending_requests[i].addr == addr)
+      {
+         if (pending_requests[i].cmd == cmd)
+         {
+            current_request = i;
+         }
+         else
+         {
+            // I either failed to model the protocol correctly, or failed to
+            // understand it. Let's crash.
+            pending_requests[-1].cmd = 0;
+         }
+
+         return;
+      }
+   }
+
+   // I either failed to model the protocol correctly, or failed to
+   // understand it. Let's crash.
+   pending_requests[-1].cmd = 0;
+}
+
+void cmd_hit (const cmd_id_t cmd)
+{
+   load_first_request_for(cmd, cache_lines[current_line].addr);
+   mark_request_as_completed();
+   current_request = 0;
+}
+
+/**** Transitions *************************************************************/
+void load_next_pending_request ()
+{
+   current_request = 0;
+   current_line = get_line_of(pending_requests[0].addr, cache_lines);
+}
+
+void keep_unstalling_requests ()
+{
+   handle_unstalling();
+   load_next_relevant_request(cache_lines[current_line].addr);
+}
+
+void handle_unstalling_requests ()
+{
+   if (current_line == -1)
+   {
+      current_request = -1;
+
+      return;
+   }
+
+   current_request = 0;
+   load_next_relevant_request(cache_lines[current_line].addr);
+}
+
+cmp_id_t get_ack_to ()
+{
+    return completed_requests[0].requester;
+}
+
+bool is_own_request ()
+{
+   return (pending_requests[current_request].requester == ID);
+}
+
+bool has_completed_auto_evict ()
+{
+   return (has_completed_request() &amp;&amp; completed_requests[0].requester == ID);
+}
+
+/******************************************************************************/
+/** Communication Management **************************************************/
+/******************************************************************************/
+msg_content_t msg_in;
+
+bool should_send_data_as_reply_flag = FALSE;
+bool should_send_data_to_mem_flag = FALSE;
+
+/**** Internal ****************************************************************/
+
+/**************/
+/**** Sending */
+/**************/
+void emit_message_content ()
+{
+   transient_msg = msg_in;
+   transient_msg.cmp_id_t_params[CMP_ID_T_EMITTER_PARAM] = ID;
+
+   //msg_in.addr_t_params[0] = cache_lines[current_line].addr;
+
+
+   //msg_in = DEFAULT_MSG;
+}
+
+/* TODO: sending protocol specific data type. */
+void send_data_as_reply ()
+{
+   transient_msg = msg_in;
+   transient_msg.cmd_id_t_param = CMD_DATA_MSG;
+   transient_msg.cmp_id_t_params[CMP_ID_T_RECEIVER_PARAM] =
+      transient_msg.cmp_id_t_params[CMP_ID_T_EMITTER_PARAM];
+   transient_msg.cmp_id_t_params[CMP_ID_T_EMITTER_PARAM] = ID;
+}
+
+void send_data_to_mem ()
+{
+   transient_msg = msg_in;
+   transient_msg.cmd_id_t_param = CMD_DATA_MSG;
+   transient_msg.cmp_id_t_params[CMP_ID_T_EMITTER_PARAM] = ID;
+   transient_msg.cmp_id_t_params[CMP_ID_T_RECEIVER_PARAM] = MEM_ID;
+}
+
+/****************/
+/**** Receiving */
+/****************/
+cmp_id_t get_emitter ()
+{
+    return msg_in.cmp_id_t_params[CMP_ID_T_EMITTER_PARAM];
+}
+
+bool is_own_message ()
+{
+   return (msg_in.cmp_id_t_params[CMP_ID_T_EMITTER_PARAM] == ID);
+}
+
+/*[CC_HANDLE_BUS_ACCESS]*/
+void handle_own_get_modified ()
+{
+   /** [TEST][HANDLE_OWN_GET_MODIFIED] **/
+   if (relevant_line_is(MSI_IM_BD))
+   {
+      set_relevant_line_to(MSI_IM_D);
+   }
+   else if (relevant_line_is(MSI_IM_B))
+   {
+      set_relevant_line_to(MSI_MODIFIED);
+
+      cmd_hit(CMD_CCTRL_STORE);
+   }
+   else if (relevant_line_is(MSI_SM_BD))
+   {
+      set_relevant_line_to(MSI_SM_D);
+   }
+   else if (relevant_line_is(MSI_SM_B))
+   {
+      set_relevant_line_to(MSI_MODIFIED);
+
+      cmd_hit(CMD_CCTRL_STORE);
+   }
+}
+
+void handle_own_get_shared ()
+{
+   /** [TEST][HANDLE_OWN_GET_SHARED] **/
+   if (relevant_line_is(MSI_IS_BD))
+   {
+      set_relevant_line_to(MSI_IS_D);
+   }
+   else if (relevant_line_is(MSI_IS_B))
+   {
+      set_relevant_line_to(MSI_SHARED);
+
+      cmd_hit(CMD_CCTRL_LOAD);
+   }
+}
+
+void handle_own_put_modified ()
+{
+   /** [TEST][HANDLE_OWN_PUT_MODIFIED] **/
+   if (relevant_line_is(MSI_MI_B))
+   {
+      set_relevant_line_to(MSI_INVALID);
+
+      /* TODO: prepare msg_in... */
+
+      /*
+       * Assumed an error in the book "send data to requestor" on own request...
+       */
+      should_send_data_to_mem_flag = TRUE;
+   }
+   else if (relevant_line_is(MSI_II_B))
+   {
+      set_relevant_line_to(MSI_INVALID);
+   }
+}
+/*[/CC_HANDLE_BUS_ACCESS]*/
+
+/*[CC_HANDLE_QUERY]*/
+void handle_get_modified ()
+{
+   /** [TEST][HANDLE_GET_MODIFIED] **/
+   if (relevant_line_is(MSI_IS_D))
+   {
+      mark_as_being(INTERFERENCE_EXPELLING);
+      set_relevant_line_to(MSI_IS_D_I);
+   }
+   else if (relevant_line_is(MSI_IM_D))
+   {
+      mark_as_being(INTERFERENCE_EXPELLING);
+      cache_lines[current_line].reply_to = get_emitter();
+
+      set_relevant_line_to(MSI_IM_D_I);
+   }
+   else if (relevant_line_is(MSI_IM_D_S))
+   {
+      set_relevant_line_to(MSI_IM_D_SI);
+   }
+   else if (relevant_line_is(MSI_SHARED))
+   {
+      mark_as_being(INTERFERENCE_EXPELLING);
+      set_relevant_line_to(MSI_INVALID);
+   }
+   else if (relevant_line_is(MSI_SM_BD))
+   {
+      mark_as_being(INTERFERENCE_EXPELLING);
+      set_relevant_line_to(MSI_IM_BD);
+   }
+   else if (relevant_line_is(MSI_SM_D))
+   {
+      mark_as_being(INTERFERENCE_EXPELLING);
+      cache_lines[current_line].reply_to = get_emitter();
+
+      set_relevant_line_to(MSI_SM_D_I);
+   }
+   else if (relevant_line_is(MSI_SM_B))
+   {
+      set_relevant_line_to(MSI_IM_B);
+   }
+   else if (relevant_line_is(MSI_SM_D_S))
+   {
+      mark_as_being(INTERFERENCE_EXPELLING);
+      set_relevant_line_to(MSI_SM_D_SI);
+   }
+   else if (relevant_line_is(MSI_MODIFIED))
+   {
+      mark_as_being(INTERFERENCE_EXPELLING);
+      set_relevant_line_to(MSI_INVALID);
+
+      should_send_data_as_reply_flag = TRUE;
+   }
+   else if (relevant_line_is(MSI_MI_B))
+   {
+      mark_as_being(INTERFERENCE_EXPELLING);
+      set_relevant_line_to(MSI_II_B);
+
+      should_send_data_as_reply_flag = TRUE;
+   }
+}
+
+void handle_get_shared ()
+{
+   /** [TEST][HANDLE_GET_SHARED] **/
+   if (relevant_line_is(MSI_IM_D))
+   {
+      mark_as_being(INTERFERENCE_DEMOTING);
+      cache_lines[current_line].reply_to = get_emitter();
+
+      set_relevant_line_to(MSI_IM_D_S);
+   }
+   else if (relevant_line_is(MSI_SM_D))
+   {
+      mark_as_being(INTERFERENCE_DEMOTING);
+      cache_lines[current_line].reply_to = get_emitter();
+
+      set_relevant_line_to(MSI_SM_D_S);
+   }
+   else if (relevant_line_is(MSI_MODIFIED))
+   {
+      mark_as_being(INTERFERENCE_DEMOTING);
+      set_relevant_line_to(MSI_SHARED);
+
+      should_send_data_as_reply_flag = TRUE;
+      should_send_data_to_mem_flag = TRUE;
+   }
+   else if (relevant_line_is(MSI_MI_B))
+   {
+      mark_as_being(INTERFERENCE_EXPELLING);
+      set_relevant_line_to(MSI_II_B);
+
+      should_send_data_as_reply_flag = TRUE;
+      should_send_data_to_mem_flag = TRUE;
+   }
+}
+
+void handle_put_modified ()
+{
+}
+/*[/CC_HANDLE_QUERY]*/
+
+void parse_bus_message ()
+{
+   cmd_id_t req_in;
+
+   msg_in = transient_msg;
+
+   cache_local_address_infos
+   [
+      msg_in.addr_t_params[0]
+   ].potential_interference_count[INTERFERENCE_MINOR] += 1;
+
+   current_line = get_line_of(msg_in.addr_t_params[0], cache_lines);
+
+   should_send_data_to_mem_flag = FALSE;
+   should_send_data_as_reply_flag = FALSE;
+   req_in = msg_in.cmd_id_t_param;
+
+   if (is_own_message())
+   {
+      /*[CC_HANDLE_BUS_ACCESS_SWITCH]*/
+      if (req_in == CMD_CCTRL_GET_SHARED)
+      {
+         handle_own_get_shared();
+      }
+      else if (req_in == CMD_CCTRL_GET_MODIFIED)
+      {
+         handle_own_get_modified();
+      }
+      else if (req_in == CMD_CCTRL_PUT_MODIFIED)
+      {
+         handle_own_put_modified();
+      }
+      /*[/CC_HANDLE_BUS_ACCESS_SWITCH]*/
+   }
+   else
+   {
+      /*[CC_HANDLE_QUERY_SWITCH]*/
+      if (req_in == CMD_CCTRL_GET_SHARED)
+      {
+         handle_get_shared();
+      }
+      else if (req_in == CMD_CCTRL_GET_MODIFIED)
+      {
+         handle_get_modified();
+      }
+      else if (req_in == CMD_CCTRL_PUT_MODIFIED)
+      {
+         handle_put_modified();
+      }
+      /*[/CC_HANDLE_QUERY_SWITCH]*/
+   }
+}
+
+/*[CC_HANDLE_REQUEST]*/
+void handle_evict (pending_request_t req)
+{
+   /** [TEST][HANDLE_EVICT] **/
+   if (relevant_line_is(MSI_INVALID))
+   {
+      req.is_cache_hit = TRUE;
+      cache_local_address_infos[req.addr].hit += 1;
+
+      push_new_pending_request(completed_requests, REQ_BUFFER_SIZE, req);
+   }
+   else if (relevant_line_is(MSI_SHARED))
+   {
+      set_relevant_line_to(MSI_INVALID);
+
+      req.is_cache_hit = TRUE;
+      cache_local_address_infos[req.addr].hit += 1;
+
+      push_new_pending_request(completed_requests, REQ_BUFFER_SIZE, req);
+   }
+   else if (relevant_line_is(MSI_MODIFIED))
+   {
+
+      req.is_cache_hit = FALSE;
+
+      push_new_pending_request(pending_requests, REQ_BUFFER_SIZE, req);
+
+      current_query.author = ID;
+      current_query.addr = cache_lines[current_line].addr;
+      current_query.cmd = CMD_CCTRL_PUT_MODIFIED;
+
+      set_relevant_line_to(MSI_MI_B);
+
+   }
+   else
+   {
+      /** Stalled: Neither miss nor hit, it's TBD... **/
+      req.is_cache_hit = TRUE;
+
+      push_new_pending_request(pending_requests, REQ_BUFFER_SIZE, req);
+   }
+}
+
+void handle_store (pending_request_t req)
+{
+   /** [TEST][HANDLE_STORE] **/
+   if (relevant_line_is(MSI_INVALID))
+   {
+      clear_interference_by_writing();
+      propagate_use_count(current_line);
+
+      current_query.author = ID;
+      current_query.addr = cache_lines[current_line].addr;
+      current_query.cmd = CMD_CCTRL_GET_MODIFIED;
+
+      req.is_cache_hit = FALSE;
+
+      set_relevant_line_to(MSI_IM_BD);
+      push_new_pending_request(pending_requests, REQ_BUFFER_SIZE, req);
+   }
+   else if (relevant_line_is(MSI_SHARED))
+   {
+      clear_interference_by_writing();
+      propagate_use_count(current_line);
+
+      req.is_cache_hit = FALSE;
+
+      push_new_pending_request(pending_requests, REQ_BUFFER_SIZE, req);
+
+      current_query.author = ID;
+      current_query.addr = cache_lines[current_line].addr;
+      current_query.cmd = CMD_CCTRL_GET_MODIFIED;
+
+      set_relevant_line_to(MSI_SM_BD);
+   }
+   else if
+   (
+      relevant_line_is(MSI_MODIFIED)
+      || relevant_line_is(MSI_MI_B)
+   )
+   {
+      clear_interference_by_writing();
+      propagate_use_count(current_line);
+
+      req.is_cache_hit = TRUE;
+      cache_local_address_infos[req.addr].hit += 1;
+
+      push_new_pending_request(completed_requests, REQ_BUFFER_SIZE, req);
+   }
+   else
+   {
+      /** Stalled: Neither miss nor hit, it's TBD... **/
+      req.is_cache_hit = TRUE;
+
+      push_new_pending_request(pending_requests, REQ_BUFFER_SIZE, req);
+   }
+}
+
+void handle_load (pending_request_t req)
+{
+   /** [TEST][HANDLE_LOAD] **/
+   if (relevant_line_is(MSI_INVALID))
+   {
+      clear_interference_by_reading();
+      propagate_use_count(current_line);
+
+      req.is_cache_hit = FALSE;
+
+      push_new_pending_request(pending_requests, REQ_BUFFER_SIZE, req);
+
+      current_query.author = ID;
+      current_query.addr = cache_lines[current_line].addr;
+      current_query.cmd = CMD_CCTRL_GET_SHARED;
+
+      set_relevant_line_to(MSI_IS_BD);
+   }
+   else if
+   (
+      relevant_line_is(MSI_SHARED)
+      || relevant_line_is(MSI_SM_BD)
+      || relevant_line_is(MSI_SM_D)
+      || relevant_line_is(MSI_SM_B)
+      || relevant_line_is(MSI_SM_D_I)
+      || relevant_line_is(MSI_SM_D_S)
+      || relevant_line_is(MSI_SM_D_SI)
+      || relevant_line_is(MSI_MODIFIED)
+      || relevant_line_is(MSI_MI_B)
+   )
+   {
+      /*
+       * It's actually a bit more complicated than that: all the MSI_SM_* are
+       * cache hits on the value BEFORE the write occurs...
+       */
+      clear_interference_by_reading();
+      propagate_use_count(current_line);
+
+      req.is_cache_hit = TRUE;
+      cache_local_address_infos[req.addr].hit += 1;
+
+      push_new_pending_request(completed_requests, REQ_BUFFER_SIZE, req);
+   }
+   else
+   {
+      /** Stalled: Neither miss nor hit, it's TBD... **/
+      req.is_cache_hit = TRUE;
+
+      push_new_pending_request(pending_requests, REQ_BUFFER_SIZE, req);
+   }
+}
+/*[/CC_HANDLE_REQUEST]*/
+
+void parse_request ()
+{
+   cmd_id_t req_cmd;
+   pending_request_t req;
+
+   msg_in = transient_msg;
+   transient_msg = DEFAULT_MSG;
+
+   req.cmd = msg_in.cmd_id_t_param;
+   req.addr = msg_in.addr_t_params[0];
+   req.requester = get_emitter();
+
+   req_cmd = req.cmd;
+
+   current_line = get_line_of(req.addr, cache_lines);
+
+   if (current_line == -1)
+   {
+      /* Cache is full and doesn't have a line for this address. */
+      req.is_cache_hit = FALSE;
+
+      blocked_request = req;
+
+      current_line = least_recently_used_line;
+
+      req_cmd = /*[CMD_CCTRL_EVICT]*/CMD_CCTRL_EVICT/*[/CMD_CCTRL_EVICT]*/;
+      req.addr = cache_lines[least_recently_used_line].addr;
+      req.cmd = /*[CMD_CCTRL_EVICT]*/CMD_CCTRL_EVICT/*[/CMD_CCTRL_EVICT]*/;
+      req.requester = ID;
+      req.is_cache_hit = TRUE;
+   }
+
+   /*
+    * current_line may be pointing at an invalidated line with a different
+    * address. This makes sure the line is dedicated to the right address.
+    */
+   cache_lines[current_line].addr = req.addr;
+
+   /* The cache has a line with this address, apply req or stall. */
+   /*[CC_HANDLE_REQUEST_SWITCH]*/
+   if (req_cmd == CMD_CCTRL_LOAD)
+   {
+      handle_load(req);
+   }
+   else if (req_cmd == CMD_CCTRL_STORE)
+   {
+      handle_store(req);
+   }
+   else if (req_cmd == CMD_CCTRL_EVICT)
+   {
+      handle_evict(req);
+   }
+   /*[/CC_HANDLE_REQUEST_SWITCH]*/
+}
+
+void unblock_request ()
+{
+   cmd_id_t req_cmd;
+
+   req_cmd = blocked_request.cmd;
+
+   current_line = get_line_of(blocked_request.addr, cache_lines);
+
+   /*
+    * current_line may be pointing at an invalidated line with a different
+    * address. This makes sure the line is dedicated to the right address.
+    */
+   cache_lines[current_line].addr = blocked_request.addr;
+
+   /* The cache has a line with this address, apply req or stall. */
+   /*[CC_HANDLE_REQUEST_SWITCH]*/
+   if (req_cmd == CMD_CCTRL_LOAD)
+   {
+      handle_load(blocked_request);
+   }
+   else if (req_cmd == CMD_CCTRL_STORE)
+   {
+      handle_store(blocked_request);
+   }
+   else if (req_cmd == CMD_CCTRL_EVICT)
+   {
+      handle_evict(blocked_request);
+   }
+   /*[/CC_HANDLE_REQUEST_SWITCH]*/
+
+   blocked_request = DEFAULT_PENDING_REQUEST_VALUE;
+}
+
+void send_completed_request_data ()
+{
+   const pending_request_t req = completed_requests[0];
+
+   transient_msg.cmp_id_t_params[CMP_ID_T_EMITTER_PARAM] = ID;
+   transient_msg.addr_t_params[0] = req.addr;
+   transient_msg.cmd_id_t_param = req.cmd;
+
+   pop_pending_request_at
+   (
+      completed_requests,
+      REQ_BUFFER_SIZE,
+      0
+   );
+}
+
+/**** Transitions *************************************************************/
+bool should_send_data_as_reply ()
+{
+   return should_send_data_as_reply_flag;
+}
+
+bool should_send_data_to_mem ()
+{
+   return should_send_data_to_mem_flag;
+}
+
+bool should_send_data ()
+{
+   return (should_send_data_as_reply_flag || should_send_data_to_mem_flag);
+}
+
+bool should_emit_query ()
+{
+   return (current_query.addr != ADDR_T_NULL);
+}
+
+void sent_data_as_reply ()
+{
+   should_send_data_as_reply_flag = FALSE;
+}
+
+void sent_data_to_mem ()
+{
+   should_send_data_to_mem_flag = FALSE;
+}
+
+void emit_query ()
+{
+   reset_transient_msg();
+
+   transient_msg.addr_t_params[0] = current_query.addr;
+   transient_msg.cmp_id_t_params[CMP_ID_T_EMITTER_PARAM] = current_query.author;
+   transient_msg.cmd_id_t_param = current_query.cmd;
+
+   current_query = DEFAULT_QUERY_VALUE;
+}
+
+void set_emitter_from_cache_line ()
+{
+   msg_in.cmp_id_t_params[CMP_ID_T_EMITTER_PARAM] =
+      cache_lines[current_line].reply_to;
+}
+
+void add_bus_master ()
+{
+   transient_msg.cmp_id_t_params[CMP_ID_T_EMITTER_PARAM] = ID;
+}
+
+/*[CC_HANDLE_DATA]*/
+/*[/CC_HANDLE_DATA]*/
+
+void handle_data_reception ()
+{
+   msg_in = transient_msg;
+
+   should_send_data_to_mem_flag = FALSE;
+   should_send_data_as_reply_flag = FALSE;
+
+   current_line = get_line_of(msg_in.addr_t_params[0], cache_lines);
+
+   /*[CC_HANDLE_DATA_SWITCH]*/
+   if (relevant_line_is(MSI_IS_BD))
+   {
+      set_relevant_line_to(MSI_IS_B);
+   }
+   else if (relevant_line_is(MSI_IS_D))
+   {
+      set_relevant_line_to(MSI_SHARED);
+      cmd_hit(CMD_CCTRL_LOAD);
+   }
+   else if (relevant_line_is(MSI_IS_D_I))
+   {
+      cmd_hit(CMD_CCTRL_LOAD);
+
+      set_relevant_line_to(MSI_INVALID);
+   }
+   else if (relevant_line_is(MSI_IM_BD))
+   {
+      set_relevant_line_to(MSI_IM_B);
+   }
+   else if (relevant_line_is(MSI_IM_D))
+   {
+      cmd_hit(CMD_CCTRL_STORE);
+
+      set_relevant_line_to(MSI_MODIFIED);
+   }
+   else if (relevant_line_is(MSI_IM_D_I))
+   {
+      cmd_hit(CMD_CCTRL_STORE);
+      set_emitter_from_cache_line();
+      should_send_data_as_reply_flag = TRUE;
+
+      set_relevant_line_to(MSI_INVALID);
+   }
+   else if (relevant_line_is(MSI_IM_D_S))
+   {
+      cmd_hit(CMD_CCTRL_STORE);
+      set_emitter_from_cache_line();
+      should_send_data_as_reply_flag = TRUE;
+      should_send_data_to_mem_flag = TRUE;
+
+      set_relevant_line_to(MSI_SHARED);
+   }
+   else if (relevant_line_is(MSI_IM_D_SI))
+   {
+      cmd_hit(CMD_CCTRL_STORE);
+      set_emitter_from_cache_line();
+      should_send_data_as_reply_flag = TRUE;
+      should_send_data_to_mem_flag = TRUE;
+
+      set_relevant_line_to(MSI_INVALID);
+   }
+   else if (relevant_line_is(MSI_SM_BD))
+   {
+      set_relevant_line_to(MSI_SM_B);
+   }
+   else if (relevant_line_is(MSI_SM_D))
+   {
+      cmd_hit(CMD_CCTRL_STORE);
+
+      set_relevant_line_to(MSI_MODIFIED);
+   }
+   else if (relevant_line_is(MSI_SM_D_I))
+   {
+      cmd_hit(CMD_CCTRL_STORE);
+      set_emitter_from_cache_line();
+      should_send_data_as_reply_flag = TRUE;
+
+      set_relevant_line_to(MSI_INVALID);
+   }
+   else if (relevant_line_is(MSI_SM_D_S))
+   {
+      cmd_hit(CMD_CCTRL_STORE);
+      set_emitter_from_cache_line();
+      should_send_data_as_reply_flag = TRUE;
+      should_send_data_to_mem_flag = TRUE;
+
+      set_relevant_line_to(MSI_SHARED);
+      cache_lines[current_line].reply_to = CMP_ID_T_NULL;
+   }
+   else if (relevant_line_is(MSI_SM_D_SI))
+   {
+      cmd_hit(CMD_CCTRL_STORE);
+      set_emitter_from_cache_line();
+      should_send_data_as_reply_flag = TRUE;
+      should_send_data_to_mem_flag = TRUE;
+
+      set_relevant_line_to(MSI_INVALID);
+   }
+   /*[/CC_HANDLE_DATA_SWITCH]*/
+}
+
+/******************************************************************************/
+/** Initialization ************************************************************/
+/******************************************************************************/
+void initialize ()
+{
+   int i, j;
+
+   current_query = DEFAULT_QUERY_VALUE;
+
+   for (i = 0; i &lt; LINES_PER_CACHE; i++)
+   {
+      cache_lines[i] = DEFAULT_CACHE_LINE_VALUE;
+      cache_lines[i].last_use = i;
+   }
+
+   for (i = 0; i &lt; REQ_BUFFER_SIZE; i++)
+   {
+      pending_requests[i] = DEFAULT_PENDING_REQUEST_VALUE;
+      completed_requests[i] = DEFAULT_PENDING_REQUEST_VALUE;
+   }
+
+   for (i = 0; i &lt; LAST_ADDR; ++i)
+   {
+      cache_local_address_infos[i].hit = 0;
+      cache_local_address_infos[i].miss = 0;
+
+      for (j = 0; j &lt; INTERFERENCE_TYPES; ++j)
+      {
+         cache_local_address_infos[i].interference_count[j] = 0;
+         cache_local_address_infos[i].potential_interference_count[j] = 0;
+      }
+   }
+
+   blocked_request = DEFAULT_PENDING_REQUEST_VALUE;
+}
+
+void clean ()
+{
+    current_line = -1;
+    current_request = -1;
+    should_send_data_as_reply_flag = FALSE;
+    should_send_data_to_mem_flag = FALSE;
+    current_query = DEFAULT_QUERY_VALUE;
+
+    msg_in = DEFAULT_MSG;
+}
+
+void is_ready ()
+{
+    is_ready_for_bus[ID] = TRUE;
+}
+
+void is_busy ()
+{
+    is_ready_for_bus[ID] = FALSE;
+}
+
+/**** Validation *************************************************************/
+// TODO: CoProSwi support.
+bool is_compatible_with (const msi_state_t s0, const msi_state_t s1)
+{
+   return
+   (
+      !((s0 == MSI_MODIFIED) &amp;&amp; ((s1 == MSI_SHARED) || (s1 == MSI_MODIFIED)))
+      &amp;&amp; !((s1 == MSI_MODIFIED) &amp;&amp; ((s0 == MSI_SHARED) || (s0 == MSI_MODIFIED)))
+   );
+}
+
+bool addr_states_are_compatible (const addr_t addr, const cache_line_t &amp;c0[LINES_PER_CACHE], const cache_line_t &amp;c1[LINES_PER_CACHE])
+{
+   return is_compatible_with(get_state_of(addr, c0), get_state_of(addr, c1));
+}</declaration>
+		<location id="id20" x="-476" y="-331">
+			<name x="-459" y="-357">S5</name>
+		</location>
+		<location id="id21" x="-161" y="-722">
+			<name x="-187" y="-714">S4</name>
+			<label kind="invariant" x="-331" y="-731">clk &lt;= C2C_DATA_TIME</label>
+		</location>
+		<location id="id22" x="-450" y="-612">
+			<name x="-433" y="-629">S2</name>
+			<label kind="invariant" x="-467" y="-646">clk &lt;= QUERY_HANDLING_TIME</label>
+		</location>
+		<location id="id23" x="-476" y="-671">
+			<name x="-459" y="-680">S1</name>
+		</location>
+		<location id="id24" x="-161" y="-501">
+			<name x="-187" y="-527">S3</name>
+		</location>
+		<location id="id25" x="-476" y="-501">
+			<name x="-527" y="-527">Ready</name>
+		</location>
+		<location id="id26" x="-688" y="-671">
+			<name x="-698" y="-705">S0</name>
+			<committed/>
+		</location>
+		<init ref="id26"/>
+		<transition>
+			<source ref="id25"/>
+			<target ref="id20"/>
+			<label kind="guard" x="-696" y="-493">has_completed_auto_evict()</label>
+			<label kind="synchronisation" x="-696" y="-476">FORCE_EXTRA_URGENT!</label>
+			<label kind="assignment" x="-696" y="-459">send_completed_request_data(),
+unblock_request()</label>
+			<nail x="-705" y="-501"/>
+			<nail x="-705" y="-416"/>
+			<nail x="-501" y="-416"/>
+			<nail x="-501" y="-348"/>
+		</transition>
+		<transition>
+			<source ref="id20"/>
+			<target ref="id25"/>
+			<label kind="guard" x="-713" y="-408">!should_unstall()
+&amp;&amp; !should_emit_query()</label>
+			<label kind="synchronisation" x="-713" y="-374">FORCE_URGENT!</label>
+			<label kind="assignment" x="-714" y="-357">clean()</label>
+			<nail x="-722" y="-331"/>
+			<nail x="-722" y="-595"/>
+			<nail x="-476" y="-595"/>
+		</transition>
+		<transition>
+			<source ref="id20"/>
+			<target ref="id20"/>
+			<label kind="guard" x="-459" y="-297">should_emit_query()</label>
+			<label kind="synchronisation" x="-442" y="-280">QUERY_OUT[ID]!</label>
+			<label kind="assignment" x="-408" y="-263">emit_query()</label>
+			<nail x="-476" y="-229"/>
+			<nail x="-323" y="-229"/>
+			<nail x="-323" y="-306"/>
+			<nail x="-450" y="-306"/>
+		</transition>
+		<transition>
+			<source ref="id20"/>
+			<target ref="id20"/>
+			<label kind="guard" x="-663" y="-306">should_unstall()
+&amp;&amp;!should_emit_query()</label>
+			<label kind="synchronisation" x="-663" y="-272">FORCE_URGENT!</label>
+			<label kind="assignment" x="-663" y="-255">keep_unstalling_requests()</label>
+			<nail x="-476" y="-229"/>
+			<nail x="-671" y="-229"/>
+			<nail x="-671" y="-306"/>
+			<nail x="-501" y="-306"/>
+		</transition>
+		<transition>
+			<source ref="id21"/>
+			<target ref="id24"/>
+			<label kind="guard" x="-323" y="-688">clk == C2C_DATA_TIME</label>
+			<label kind="synchronisation" x="-280" y="-671">MAX_PRIORITY!</label>
+		</transition>
+		<transition>
+			<source ref="id22"/>
+			<target ref="id24"/>
+			<label kind="guard" x="-399" y="-629">clk == QUERY_HANDLING_TIME</label>
+			<label kind="synchronisation" x="-297" y="-612">MAX_PRIORITY!</label>
+			<nail x="-161" y="-612"/>
+		</transition>
+		<transition>
+			<source ref="id26"/>
+			<target ref="id23"/>
+			<label kind="synchronisation" x="-654" y="-705">ADD_BUS_MASTER!</label>
+			<label kind="assignment" x="-654" y="-688">add_bus_master()</label>
+		</transition>
+		<transition>
+			<source ref="id25"/>
+			<target ref="id25"/>
+			<label kind="guard" x="-696" y="-578">has_completed_request()</label>
+			<label kind="synchronisation" x="-696" y="-561">CPU_ACK[get_ack_to()]!</label>
+			<label kind="assignment" x="-696" y="-544">send_completed_request_data(),
+clean()</label>
+			<nail x="-705" y="-501"/>
+			<nail x="-705" y="-586"/>
+			<nail x="-476" y="-586"/>
+		</transition>
+		<transition>
+			<source ref="id24"/>
+			<target ref="id20"/>
+			<label kind="guard" x="-348" y="-391">!should_send_data()</label>
+			<label kind="synchronisation" x="-348" y="-374">FORCE_EXTRA_URGENT!</label>
+			<label kind="assignment" x="-348" y="-357">handle_unstalling_requests()</label>
+			<nail x="-161" y="-331"/>
+		</transition>
+		<transition>
+			<source ref="id24"/>
+			<target ref="id24"/>
+			<label kind="guard" x="-127" y="-594">should_send_data_to_mem()</label>
+			<label kind="synchronisation" x="-42" y="-578">DATA_OUT[ID]!</label>
+			<label kind="assignment" x="-76" y="-561">send_data_to_mem(),
+sent_data_to_mem()</label>
+			<nail x="68" y="-501"/>
+			<nail x="68" y="-603"/>
+			<nail x="-161" y="-603"/>
+		</transition>
+		<transition>
+			<source ref="id24"/>
+			<target ref="id21"/>
+			<label kind="guard" x="-153" y="-714">should_send_data_as_reply()
+&amp;&amp; !should_send_data_to_mem()</label>
+			<label kind="synchronisation" x="-42" y="-680">DATA_OUT[ID]!</label>
+			<label kind="assignment" x="-84" y="-663">send_data_as_reply(),
+sent_data_as_reply(),
+clk = 0</label>
+			<nail x="68" y="-501"/>
+			<nail x="68" y="-722"/>
+		</transition>
+		<transition>
+			<source ref="id25"/>
+			<target ref="id22"/>
+			<label kind="synchronisation" x="-442" y="-595">QUERY_IN[ID]?</label>
+			<label kind="assignment" x="-442" y="-578">parse_bus_message(),
+clk = 0</label>
+			<nail x="-450" y="-527"/>
+		</transition>
+		<transition>
+			<source ref="id25"/>
+			<target ref="id20"/>
+			<label kind="guard" x="-467" y="-476">!has_completed_request()
+&amp;&amp; can_take_requests()</label>
+			<label kind="synchronisation" x="-467" y="-442">CPU_REQ[ID]?</label>
+			<label kind="assignment" x="-467" y="-425">parse_request()</label>
+		</transition>
+		<transition>
+			<source ref="id25"/>
+			<target ref="id24"/>
+			<label kind="synchronisation" x="-399" y="-518">DATA_IN[ID]?</label>
+			<label kind="assignment" x="-399" y="-501">handle_data_reception()</label>
+		</transition>
+		<transition>
+			<source ref="id23"/>
+			<target ref="id25"/>
+			<label kind="synchronisation" x="-552" y="-654">SYS_INIT?</label>
+			<label kind="assignment" x="-552" y="-637">initialize(),
+clean()</label>
+		</transition>
+	</template>
+	<template>
+		<name>QueryFIFO</name>
+		<parameter>cmp_id_t CCTRL_ID</parameter>
+		<declaration>const int IN_QUERY_BUFFER_SIZE = 5;
+const int OUT_QUERY_BUFFER_SIZE = IN_QUERY_BUFFER_SIZE;
+const int MAX_QUERY_BUFFER_SIZE = IN_QUERY_BUFFER_SIZE;
+query_t in_queries[MAX_QUERY_BUFFER_SIZE];
+query_t out_queries[MAX_QUERY_BUFFER_SIZE];
+
+
+/**** Internal ****************************************************************/
+void pop
+(
+   query_t &amp;array[MAX_QUERY_BUFFER_SIZE],
+   const int queue_size
+)
+{
+   int i;
+
+   for (i = 1; i &lt; queue_size; ++i)
+   {
+      /* No "break" in UPPAAL. */
+      if (array[i - 1].addr == ADDR_T_NULL)
+      {
+         array[i - 1] = array[i];
+         i = queue_size;
+      }
+      else
+      {
+         array[i - 1] = array[i];
+      }
+   }
+
+   array[queue_size - 1] = DEFAULT_QUERY_VALUE;
+}
+
+void push
+(
+   query_t &amp;array[MAX_QUERY_BUFFER_SIZE],
+   const int queue_size,
+   const query_t msg
+)
+{
+   int i;
+
+   for (i = 0; i &lt; queue_size; ++i)
+   {
+      if (array[i].addr == ADDR_T_NULL)
+      {
+         array[i] = msg;
+
+         return;
+      }
+   }
+}
+
+void push_query (query_t &amp;array[MAX_QUERY_BUFFER_SIZE], const int array_size)
+{
+   query_t query0;
+
+   query0.addr = transient_msg.addr_t_params[0];
+   query0.cmd = transient_msg.cmd_id_t_param;
+   query0.author = transient_msg.cmp_id_t_params[CMP_ID_T_EMITTER_PARAM];
+
+   push
+   (
+      array,
+      array_size,
+      query0
+   );
+}
+
+void pop_query (query_t &amp;array[MAX_QUERY_BUFFER_SIZE], const int array_size)
+{
+   const query_t query0 = array[0];
+
+   reset_transient_msg();
+
+   transient_msg.addr_t_params[0] = query0.addr;
+   transient_msg.cmp_id_t_params[CMP_ID_T_EMITTER_PARAM] = query0.author;
+   transient_msg.cmd_id_t_param = query0.cmd;
+
+   pop(array, array_size);
+}
+
+/**** Transitions *************************************************************/
+bool in_queries_not_empty ()
+{
+   return (in_queries[0].addr != ADDR_T_NULL);
+}
+
+bool out_queries_not_empty ()
+{
+   return (out_queries[0].addr != ADDR_T_NULL);
+}
+
+bool in_queries_not_full ()
+{
+   return (in_queries[IN_QUERY_BUFFER_SIZE - 1].addr == ADDR_T_NULL);
+}
+
+bool out_queries_not_full ()
+{
+   return (out_queries[OUT_QUERY_BUFFER_SIZE - 1].addr == ADDR_T_NULL);
+}
+
+void pop_in_query ()
+{
+   pop_query(in_queries, IN_QUERY_BUFFER_SIZE);
+
+   transient_msg.cmp_id_t_params[CMP_ID_T_RECEIVER_PARAM] = CCTRL_ID;
+
+   is_ready_for_bus[CCTRL_ID] = TRUE;
+}
+
+void pop_out_query ()
+{
+   pop_query(out_queries, OUT_QUERY_BUFFER_SIZE);
+
+   transient_msg.cmp_id_t_params[CMP_ID_T_RECEIVER_PARAM] =
+      transient_msg.cmp_id_t_params[CMP_ID_T_EMITTER_PARAM];
+
+   transient_msg.cmp_id_t_params[CMP_ID_T_EMITTER_PARAM] = CCTRL_ID;
+
+   has_use_for_bus[CCTRL_ID] = out_queries_not_empty();
+}
+
+void push_in_query ()
+{
+   push_query(in_queries, IN_QUERY_BUFFER_SIZE);
+   is_ready_for_bus[CCTRL_ID] = in_queries_not_full();
+}
+
+void push_out_query ()
+{
+   push_query(out_queries, OUT_QUERY_BUFFER_SIZE);
+   has_use_for_bus[CCTRL_ID] = TRUE;
+}
+
+void initialize ()
+{
+   int i;
+
+   for (i = 0; i &lt; MAX_QUERY_BUFFER_SIZE; ++i)
+   {
+      in_queries[i] = DEFAULT_QUERY_VALUE;
+      out_queries[i] = DEFAULT_QUERY_VALUE;
+   }
+}
+</declaration>
+		<location id="id27" x="0" y="76">
+			<name x="-34" y="68">S0</name>
+		</location>
+		<location id="id28" x="0" y="34">
+			<name x="-51" y="8">Ready</name>
+		</location>
+		<init ref="id27"/>
+		<transition>
+			<source ref="id27"/>
+			<target ref="id28"/>
+			<label kind="synchronisation" x="17" y="51">SYS_INIT?</label>
+			<label kind="assignment" x="17" y="68">initialize()</label>
+		</transition>
+		<transition>
+			<source ref="id28"/>
+			<target ref="id28"/>
+			<label kind="guard" x="25" y="-93">out_queries_not_empty()</label>
+			<label kind="synchronisation" x="8" y="-76">QUERY_TO_BUS[CCTRL_ID]!</label>
+			<label kind="assignment" x="68" y="-59">pop_out_query()</label>
+			<nail x="204" y="34"/>
+			<nail x="204" y="-102"/>
+			<nail x="0" y="-102"/>
+		</transition>
+		<transition>
+			<source ref="id28"/>
+			<target ref="id28"/>
+			<label kind="guard" x="51" y="-25">out_queries_not_full()</label>
+			<label kind="synchronisation" x="25" y="-8">QUERY_OUT[CCTRL_ID]?</label>
+			<label kind="assignment" x="76" y="8">push_out_query()</label>
+			<nail x="204" y="34"/>
+			<nail x="204" y="-34"/>
+			<nail x="0" y="-34"/>
+		</transition>
+		<transition>
+			<source ref="id28"/>
+			<target ref="id28"/>
+			<label kind="guard" x="-161" y="-93">in_queries_not_empty()</label>
+			<label kind="synchronisation" x="-161" y="-76">QUERY_IN[CCTRL_ID]!</label>
+			<label kind="assignment" x="-161" y="-59">pop_in_query()</label>
+			<nail x="-170" y="34"/>
+			<nail x="-170" y="-102"/>
+			<nail x="0" y="-102"/>
+		</transition>
+		<transition>
+			<source ref="id28"/>
+			<target ref="id28"/>
+			<label kind="synchronisation" x="-161" y="-8">QUERY_BROADCAST?</label>
+			<label kind="assignment" x="-161" y="8">push_in_query()</label>
+			<nail x="-170" y="34"/>
+			<nail x="-170" y="-34"/>
+			<nail x="0" y="-34"/>
+		</transition>
+	</template>
+	<system>
+// Automaton allowing the URGENT transitions.
+UrgentHandler = ForceUrgent();
+
+// Query Bus (ID = 0)
+QBus0 = QueryBus(0);
+
+// Memory Controller (ID = 2) &amp; associated Data FIFO (OWNER_ID = 2).
+Mem0 = MemoryCTRL(2); DFIFOMem = DataFIFO(2);
+
+// Coherency Manager (ID = 1, MEM_ID = 2)
+Coherency0 = CoherencyMGR(1, 2);
+
+// Caches
+// Each line is:
+// Cache (ID = x, MEM_ID = 2), associated query FIFO (OWNER_ID = x), and data
+// FIFO (OWNER_ID = x).
+// If you change the number of caches, don't forget to update the CORE_COUNT
+// constant in the system declaration.
+// Also ensure that the value of COMPONENT_COUNT is higher than the highest
+// ID you attributed.
+CCTRL0 = MSICacheCTRL(3, 2); QFIO0 = QueryFIFO(3); DFIFO0 = DataFIFO(3);
+CCTRL1 = MSICacheCTRL(4, 2); QFIO1 = QueryFIFO(4); DFIFO1 = DataFIFO(4);
+CCTRL2 = MSICacheCTRL(5, 2); QFIO2 = QueryFIFO(5); DFIFO2 = DataFIFO(5);
+CCTRL3 = MSICacheCTRL(6, 2); QFIO3 = QueryFIFO(6); DFIFO3 = DataFIFO(6);
+
+// Cores
+// Each line is: (ID, CACHE_ID, PROGRAM_ID)
+// Programs can be found in the Core template's declaration.
+Test0a = Core(9, 3, 200);
+Test1a = Core(10, 4, 200);
+Test2a = Core(11, 5, 200);
+Test3a = Core(12, 6, 200);
+
+system
+        DFIFO0, CCTRL0, QFIO0, Test0a,
+
+        DFIFO1, CCTRL1, QFIO1, Test1a,
+//        DFIFO2, CCTRL2, QFIO2, Test2a,
+//        DFIFO3, CCTRL3, QFIO3, Test3a,
+
+
+        QBus0, Mem0, DFIFOMem, Coherency0, UrgentHandler
+        ;
+</system>
+	<queries>
+		<query>
+			<formula>A&lt;&gt; ((Test0a.Terminated) and (Test1a.Terminated) and (Test2a.Terminated) and (Test3a.Terminated))
+			</formula>
+			<comment>States that all cores always end up completing their program.</comment>
+		</query>
+		<query>
+			<formula>A[]
+(
+   forall (addr: addr_t)
+   (
+      (addr == ADDR_T_NULL)
+      ||
+      (
+         CCTRL0.addr_states_are_compatible(addr, CCTRL0.cache_lines, CCTRL1.cache_lines)
+         &amp;&amp; CCTRL0.addr_states_are_compatible(addr, CCTRL0.cache_lines, CCTRL2.cache_lines)
+         &amp;&amp; CCTRL0.addr_states_are_compatible(addr, CCTRL0.cache_lines, CCTRL3.cache_lines)
+         &amp;&amp; CCTRL0.addr_states_are_compatible(addr, CCTRL1.cache_lines, CCTRL2.cache_lines)
+         &amp;&amp; CCTRL0.addr_states_are_compatible(addr, CCTRL1.cache_lines, CCTRL3.cache_lines)
+         &amp;&amp; CCTRL0.addr_states_are_compatible(addr, CCTRL2.cache_lines, CCTRL3.cache_lines)
+      )
+   )
+)</formula>
+			<comment>States that at any time, for all addresses, there are no incompatibility between the states of two caches.
+In other words, this tests the "Single Writer or Multiple Readers" property for all addresses at all times.</comment>
+		</query>
+		<query>
+			<formula>sup{not Test0a.Terminated}: Test0a.runtime
+			</formula>
+			<comment>Highest value of Test0a.runtime when Test0a is not in the Terminated location.
+In other words, longest execution time for the program ran by Test0a.</comment>
+		</query>
+	</queries>
+</nta>
