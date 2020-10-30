@@ -1,0 +1,822 @@
+(add_data_type CMD_DATA_MSG)
+(add_data_type CMD_DATA_EXCLUSIVE_MSG)
+(add_data_type CMD_NO_DATA_MSG)
+
+(add_query_type CMD_CCTRL_GET_SHARED)
+(add_query_type CMD_CCTRL_GET_MODIFIED)
+(add_query_type CMD_CCTRL_PUT_MODIFIED)
+
+(define_cache_controller
+   (add_state stable MSI_MODIFIED)
+   (add_state stable MSI_EXCLUSIVE)
+   (add_state stable MSI_SHARED)
+   (add_state stable MSI_INVALID)
+   (add_state stable MSI_FORWARD)
+
+   (set_default_state MSI_INVALID)
+
+   (add_state transient MSI_IF_BD)
+   (add_state transient MSI_IF_B)
+
+   (add_state transient MSI_IS_D)
+   (add_state transient MSI_IEOF_D)
+   (add_state transient MSI_IS_D_I)
+
+   (add_state transient MSI_IM_BD)
+   (add_state transient MSI_IM_B)
+   (add_state transient MSI_IM_D)
+
+   (add_state transient MSI_IM_D_I)
+   (add_state transient MSI_IM_D_S)
+   (add_state transient MSI_IM_D_SI)
+
+   (add_state transient MSI_SM_BD)
+   (add_state transient MSI_FM_B)
+   (add_state transient MSI_SM_B)
+   (add_state transient MSI_SM_D)
+
+   (add_state transient MSI_SM_D_I)
+   (add_state transient MSI_SM_D_S)
+   (add_state transient MSI_SM_D_SI)
+
+   (add_state transient MSI_MI_B)
+
+   (add_state transient MSI_II_B)
+
+   (add_state transient MSI_IE_B)
+
+   (add_state transient MSI_EI_B)
+
+   (add_state transient MSI_FI_B)
+
+
+   (MSI_INVALID
+      (CMD_CCTRL_LOAD
+         (send_query CMD_CCTRL_GET_SHARED)
+         (set_state MSI_IF_BD)
+      )
+      (CMD_CCTRL_STORE
+         (send_query CMD_CCTRL_GET_MODIFIED)
+         (set_state MSI_IM_BD)
+      )
+      (CMD_CCTRL_EVICT (hit))
+
+      (bus_access (none))
+
+      (CMD_DATA_MSG (none))
+      (CMD_DATA_EXCLUSIVE_MSG (none))
+      (CMD_NO_DATA_MSG (none))
+
+      (CMD_CCTRL_GET_SHARED (mark_interference minor))
+      (CMD_CCTRL_GET_MODIFIED (mark_interference minor))
+      (CMD_CCTRL_PUT_MODIFIED (mark_interference minor))
+   )
+
+   (MSI_IF_BD
+      (CMD_CCTRL_LOAD (stall))
+      (CMD_CCTRL_STORE (stall))
+      (CMD_CCTRL_EVICT (stall))
+
+      (bus_access (set_state MSI_IEOF_D))
+
+      (CMD_DATA_MSG (set_state MSI_IF_B))
+      (CMD_DATA_EXCLUSIVE_MSG (set_state MSI_IE_B))
+      (CMD_NO_DATA_MSG (none))
+
+      (CMD_CCTRL_GET_SHARED (mark_interference minor))
+      (CMD_CCTRL_GET_MODIFIED (mark_interference minor))
+      (CMD_CCTRL_PUT_MODIFIED (mark_interference minor))
+   )
+
+   (MSI_IF_B
+      (CMD_CCTRL_LOAD (stall))
+      (CMD_CCTRL_STORE (stall))
+      (CMD_CCTRL_EVICT (stall))
+
+      (bus_access (set_state MSI_FORWARD))
+
+      (CMD_DATA_MSG (none))
+      (CMD_DATA_EXCLUSIVE_MSG (none))
+      (CMD_NO_DATA_MSG (none))
+
+      (CMD_CCTRL_GET_SHARED (mark_interference minor))
+      (CMD_CCTRL_GET_MODIFIED (mark_interference minor))
+      (CMD_CCTRL_PUT_MODIFIED (mark_interference minor))
+   )
+
+   (MSI_IS_D
+      (CMD_CCTRL_LOAD (stall))
+      (CMD_CCTRL_STORE (stall))
+      (CMD_CCTRL_EVICT (stall))
+
+      (bus_access (none))
+
+      (CMD_DATA_MSG
+         (sender!CMD_DATA_MSG)
+         (reset_owner)
+         (set_state MSI_SHARED)
+      )
+      (CMD_DATA_EXCLUSIVE_MSG
+         (sender!CMD_DATA_MSG)
+         (reset_owner)
+         (memory!CMD_NO_DATA_MSG)
+         (set_state MSI_SHARED)
+      )
+      (CMD_NO_DATA_MSG (none))
+
+      (CMD_CCTRL_GET_SHARED (mark_interference minor))
+      (CMD_CCTRL_GET_MODIFIED (set_state MSI_IS_D_I))
+      (CMD_CCTRL_PUT_MODIFIED (mark_interference minor))
+   )
+
+   (MSI_IEOF_D
+      (CMD_CCTRL_LOAD (stall))
+      (CMD_CCTRL_STORE (stall))
+      (CMD_CCTRL_EVICT (stall))
+
+      (bus_access (none))
+
+      (CMD_DATA_MSG
+         (set_state MSI_FORWARD)
+      )
+      (CMD_DATA_EXCLUSIVE_MSG
+         (set_state MSI_EXCLUSIVE)
+      )
+      (CMD_NO_DATA_MSG (none))
+
+      (CMD_CCTRL_GET_SHARED
+         (store_owner)
+         (set_state MSI_IS_D)
+      )
+      (CMD_CCTRL_GET_MODIFIED
+         (store_owner)
+         (set_state MSI_IS_D_I)
+      )
+      (CMD_CCTRL_PUT_MODIFIED (mark_interference minor))
+   )
+
+   (MSI_IS_D_I
+      (CMD_CCTRL_LOAD (stall))
+      (CMD_CCTRL_STORE (stall))
+      (CMD_CCTRL_EVICT (stall))
+
+      (bus_access (none))
+
+      (CMD_DATA_MSG
+         (hit CMD_CCTRL_LOAD)
+         (reply_to!CMD_DATA_MSG)
+         (reset_reply_to)
+         (set_state MSI_INVALID)
+      )
+      (CMD_DATA_EXCLUSIVE_MSG
+         (hit CMD_CCTRL_LOAD)
+         (reply_to!CMD_DATA_MSG)
+         (reset_reply_to)
+         (memory!CMD_NO_DATA_MSG)
+         (set_state MSI_INVALID)
+      )
+      (CMD_NO_DATA_MSG (ignore))
+
+      (CMD_CCTRL_GET_SHARED (ignore))
+      (CMD_CCTRL_GET_MODIFIED (ignore))
+      (CMD_CCTRL_PUT_MODIFIED (ignore))
+   )
+
+   (MSI_IM_BD
+      (CMD_CCTRL_LOAD (stall))
+      (CMD_CCTRL_STORE (stall))
+      (CMD_CCTRL_EVICT (stall))
+
+      (bus_access (set_state MSI_IM_D))
+
+      (CMD_DATA_MSG (set_state MSI_IM_B))
+      (CMD_DATA_EXCLUSIVE_MSG (none))
+      (CMD_NO_DATA_MSG (none))
+
+      (CMD_CCTRL_GET_SHARED (ignore))
+      (CMD_CCTRL_GET_MODIFIED (ignore))
+      (CMD_CCTRL_PUT_MODIFIED (ignore))
+   )
+
+   (MSI_IM_B
+      (CMD_CCTRL_LOAD (stall))
+      (CMD_CCTRL_STORE (stall))
+      (CMD_CCTRL_EVICT (stall))
+
+      (bus_access (set_state MSI_MODIFIED))
+
+      (CMD_DATA_MSG (none))
+      (CMD_DATA_EXCLUSIVE_MSG (none))
+      (CMD_NO_DATA_MSG (none))
+
+      (CMD_CCTRL_GET_SHARED (ignore))
+      (CMD_CCTRL_GET_MODIFIED (ignore))
+      (CMD_CCTRL_PUT_MODIFIED (ignore))
+   )
+
+   (MSI_IM_D
+      (CMD_CCTRL_LOAD (stall))
+      (CMD_CCTRL_STORE (stall))
+      (CMD_CCTRL_EVICT (stall))
+
+      (bus_access (none))
+
+      (CMD_DATA_MSG (set_state MSI_MODIFIED))
+      (CMD_DATA_EXCLUSIVE_MSG (none))
+      (CMD_NO_DATA_MSG (none))
+
+      (CMD_CCTRL_GET_SHARED
+         (store_owner)
+         (set_state MSI_IM_D_S)
+      )
+      (CMD_CCTRL_GET_MODIFIED
+         (store_owner)
+         (set_state MSI_IM_D_I)
+      )
+      (CMD_CCTRL_PUT_MODIFIED (ignore))
+   )
+
+   (MSI_IM_D_I
+      (CMD_CCTRL_LOAD (stall))
+      (CMD_CCTRL_STORE (stall))
+      (CMD_CCTRL_EVICT (stall))
+
+      (bus_access (none))
+
+      (CMD_DATA_MSG
+         (hit CMD_CCTRL_STORE)
+         (reply_to!CMD_DATA_MSG)
+         (reset_owner)
+         (set_state MSI_INVALID)
+      )
+      (CMD_DATA_EXCLUSIVE_MSG (none))
+      (CMD_NO_DATA_MSG (none))
+
+      (CMD_CCTRL_GET_SHARED (ignore))
+      (CMD_CCTRL_GET_MODIFIED (ignore))
+      (CMD_CCTRL_PUT_MODIFIED (ignore))
+   )
+
+   (MSI_IM_D_S
+      (CMD_CCTRL_LOAD (stall))
+      (CMD_CCTRL_STORE (stall))
+      (CMD_CCTRL_EVICT (stall))
+
+      (bus_access (none))
+
+      (CMD_DATA_MSG
+         (hit CMD_CCTRL_STORE)
+         (reply_to!CMD_DATA_MSG)
+         (reset_owner)
+         (memory!CMD_DATA_MSG)
+         (set_state MSI_SHARED)
+      )
+      (CMD_DATA_EXCLUSIVE_MSG (none))
+      (CMD_NO_DATA_MSG (none))
+
+      (CMD_CCTRL_GET_SHARED (ignore))
+      (CMD_CCTRL_GET_MODIFIED (set_state MSI_IM_D_SI))
+      (CMD_CCTRL_PUT_MODIFIED (ignore))
+   )
+
+   (MSI_IM_D_SI
+      (CMD_CCTRL_LOAD (stall))
+      (CMD_CCTRL_STORE (stall))
+      (CMD_CCTRL_EVICT (stall))
+
+      (bus_access (none))
+
+      (CMD_DATA_MSG
+         (hit CMD_CCTRL_STORE)
+         (reply_to!CMD_DATA_MSG)
+         (reset_owner)
+         (memory!CMD_DATA_MSG)
+         (set_state MSI_INVALID)
+      )
+      (CMD_DATA_EXCLUSIVE_MSG (none))
+      (CMD_NO_DATA_MSG (none))
+
+      (CMD_CCTRL_GET_SHARED (ignore))
+      (CMD_CCTRL_GET_MODIFIED (ignore))
+      (CMD_CCTRL_PUT_MODIFIED (ignore))
+   )
+
+   (MSI_SHARED
+      (CMD_CCTRL_LOAD (hit))
+      (CMD_CCTRL_STORE
+         (send_query CMD_CCTRL_GET_MODIFIED)
+         (set_state MSI_SM_BD)
+      )
+      (CMD_CCTRL_EVICT
+         (hit)
+         (set_state MSI_INVALID)
+      )
+
+      (bus_access (none))
+
+      (CMD_DATA_MSG (none))
+      (CMD_DATA_EXCLUSIVE_MSG (none))
+      (CMD_NO_DATA_MSG (none))
+
+      (CMD_CCTRL_GET_SHARED (ignore))
+      (CMD_CCTRL_GET_MODIFIED (set_state MSI_INVALID))
+      (CMD_CCTRL_PUT_MODIFIED (ignore))
+   )
+
+   (MSI_FORWARD
+      (CMD_CCTRL_LOAD (hit))
+      (CMD_CCTRL_STORE
+         (send_query CMD_CCTRL_GET_MODIFIED)
+         (set_state MSI_FM_B)
+      )
+      (CMD_CCTRL_EVICT
+         (send_query CMD_CCTRL_PUT_MODIFIED)
+         (set_state MSI_FI_B)
+      )
+
+      (bus_access (none))
+
+      (CMD_DATA_MSG (none))
+      (CMD_DATA_EXCLUSIVE_MSG (none))
+      (CMD_NO_DATA_MSG (none))
+
+      (CMD_CCTRL_GET_SHARED
+         (sender!CMD_DATA_MSG)
+         (set_state MSI_SHARED)
+      )
+      (CMD_CCTRL_GET_MODIFIED
+         (sender!CMD_DATA_MSG)
+         (set_state MSI_INVALID)
+      )
+      (CMD_CCTRL_PUT_MODIFIED (ignore))
+   )
+
+   (MSI_SM_BD
+      (CMD_CCTRL_LOAD (hit))
+      (CMD_CCTRL_STORE (stall))
+      (CMD_CCTRL_EVICT (stall))
+
+      (bus_access (set_state MSI_SM_D))
+
+      (CMD_DATA_MSG (set_state MSI_SM_B))
+      (CMD_DATA_EXCLUSIVE_MSG (none))
+      (CMD_NO_DATA_MSG (none))
+
+      (CMD_CCTRL_GET_SHARED (ignore))
+      (CMD_CCTRL_GET_MODIFIED
+         (set_state MSI_IM_BD)
+      )
+      (CMD_CCTRL_PUT_MODIFIED (ignore))
+   )
+
+   (MSI_FM_B
+      (CMD_CCTRL_LOAD (hit))
+      (CMD_CCTRL_STORE (stall))
+      (CMD_CCTRL_EVICT (stall))
+
+      (bus_access (set_state MSI_MODIFIED))
+
+      (CMD_DATA_MSG (none))
+      (CMD_DATA_EXCLUSIVE_MSG (none))
+      (CMD_NO_DATA_MSG (none))
+
+      (CMD_CCTRL_GET_SHARED
+         (sender!CMD_DATA_MSG)
+         (set_state MSI_SM_BD)
+      )
+      (CMD_CCTRL_GET_MODIFIED
+         (sender!CMD_DATA_MSG)
+         (set_state MSI_IM_B)
+      )
+      (CMD_CCTRL_PUT_MODIFIED (ignore))
+   )
+
+   (MSI_SM_B
+      (CMD_CCTRL_LOAD (hit))
+      (CMD_CCTRL_STORE (stall))
+      (CMD_CCTRL_EVICT (stall))
+
+      (bus_access (set_state MSI_MODIFIED))
+
+      (CMD_DATA_MSG (none))
+      (CMD_DATA_EXCLUSIVE_MSG (none))
+      (CMD_NO_DATA_MSG (none))
+
+      (CMD_CCTRL_GET_SHARED (ignore))
+      (CMD_CCTRL_GET_MODIFIED (set_state MSI_IM_B))
+      (CMD_CCTRL_PUT_MODIFIED (ignore))
+   )
+
+   (MSI_SM_D
+      (CMD_CCTRL_LOAD (hit))
+      (CMD_CCTRL_STORE (stall))
+      (CMD_CCTRL_EVICT (stall))
+
+      (bus_access (none))
+
+      (CMD_DATA_MSG
+         (hit CMD_CCTRL_STORE)
+         (set_state MSI_MODIFIED)
+      )
+      (CMD_DATA_EXCLUSIVE_MSG (none))
+      (CMD_NO_DATA_MSG (none))
+
+      (CMD_CCTRL_GET_SHARED
+         (store_reply_to)
+         (set_state MSI_SM_D_S)
+      )
+      (CMD_CCTRL_GET_MODIFIED
+         (store_reply_to)
+         (set_state MSI_SM_D_I)
+      )
+      (CMD_CCTRL_PUT_MODIFIED (ignore))
+   )
+
+   (MSI_SM_D_I
+      (CMD_CCTRL_LOAD (hit))
+      (CMD_CCTRL_STORE (stall))
+      (CMD_CCTRL_EVICT (stall))
+
+      (bus_access (none))
+
+      (CMD_DATA_MSG
+         (hit CMD_CCTRL_STORE)
+         (reply_to!CMD_DATA_MSG)
+         (reset_reply_to)
+         (set_state MSI_INVALID)
+      )
+      (CMD_DATA_EXCLUSIVE_MSG (none))
+      (CMD_NO_DATA_MSG (none))
+
+      (CMD_CCTRL_GET_SHARED (ignore))
+      (CMD_CCTRL_GET_MODIFIED (ignore))
+      (CMD_CCTRL_PUT_MODIFIED (ignore))
+   )
+
+   (MSI_SM_D_S
+      (CMD_CCTRL_LOAD (hit))
+      (CMD_CCTRL_STORE (stall))
+      (CMD_CCTRL_EVICT (stall))
+
+      (bus_access (none))
+
+      (CMD_DATA_MSG
+         (hit CMD_CCTRL_STORE)
+         (reply_to!CMD_DATA_MSG)
+         (memory!CMD_DATA_MSG)
+         (reset_reply_to)
+         (set_state MSI_SHARED)
+      )
+      (CMD_DATA_EXCLUSIVE_MSG (none))
+      (CMD_NO_DATA_MSG (none))
+
+      (CMD_CCTRL_GET_SHARED (ignore))
+      (CMD_CCTRL_GET_MODIFIED (set_state MSI_SM_D_SI))
+      (CMD_CCTRL_PUT_MODIFIED (ignore))
+   )
+
+   (MSI_SM_D_SI
+      (CMD_CCTRL_LOAD (hit))
+      (CMD_CCTRL_STORE (stall))
+      (CMD_CCTRL_EVICT (stall))
+
+      (bus_access (none))
+
+      (CMD_DATA_MSG
+         (hit CMD_CCTRL_STORE)
+         (reply_to!CMD_DATA_MSG)
+         (memory!CMD_DATA_MSG)
+         (reset_reply_to)
+         (set_state MSI_INVALID)
+      )
+      (CMD_DATA_EXCLUSIVE_MSG (none))
+      (CMD_NO_DATA_MSG (none))
+
+      (CMD_CCTRL_GET_SHARED (ignore))
+      (CMD_CCTRL_GET_MODIFIED (ignore))
+      (CMD_CCTRL_PUT_MODIFIED (ignore))
+   )
+
+   (MSI_MODIFIED
+      (CMD_CCTRL_LOAD (hit))
+      (CMD_CCTRL_STORE (hit))
+      (CMD_CCTRL_EVICT
+         (send_query CMD_CCTRL_PUT_MODIFIED)
+         (set_state MSI_MI_B)
+      )
+
+      (bus_access (none))
+
+      (CMD_DATA_MSG (none))
+      (CMD_DATA_EXCLUSIVE_MSG (none))
+      (CMD_NO_DATA_MSG (none))
+
+      (CMD_CCTRL_GET_SHARED
+         (memory!CMD_DATA_MSG)
+         (sender!CMD_DATA_MSG)
+         (set_state MSI_SHARED)
+      )
+      (CMD_CCTRL_GET_MODIFIED
+         (sender!CMD_DATA_MSG)
+         (set_state MSI_INVALID)
+      )
+      (CMD_CCTRL_PUT_MODIFIED (ignore))
+   )
+
+   (MSI_MI_B
+      (CMD_CCTRL_LOAD (hit))
+      (CMD_CCTRL_STORE (hit))
+      (CMD_CCTRL_EVICT (stall))
+
+      (bus_access
+         (memory!CMD_DATA_MSG)
+         (set_state MSI_INVALID)
+      )
+
+      (CMD_DATA_MSG (none))
+      (CMD_DATA_EXCLUSIVE_MSG (none))
+      (CMD_NO_DATA_MSG (none))
+
+      (CMD_CCTRL_GET_SHARED
+         (memory!CMD_DATA_MSG)
+         (sender!CMD_DATA_MSG)
+         (set_state MSI_II_B)
+      )
+      (CMD_CCTRL_GET_MODIFIED
+         (sender!CMD_DATA_MSG)
+         (set_state MSI_II_B)
+      )
+      (CMD_CCTRL_PUT_MODIFIED (ignore))
+   )
+
+   (MSI_II_B
+      (CMD_CCTRL_LOAD (stall))
+      (CMD_CCTRL_STORE (stall))
+      (CMD_CCTRL_EVICT (stall))
+
+      (bus_access (set_state MSI_INVALID))
+
+      (CMD_DATA_MSG (none))
+      (CMD_DATA_EXCLUSIVE_MSG (none))
+      (CMD_NO_DATA_MSG (none))
+
+      (CMD_CCTRL_GET_SHARED (ignore))
+      (CMD_CCTRL_GET_MODIFIED (ignore))
+      (CMD_CCTRL_PUT_MODIFIED (ignore))
+   )
+
+   (MSI_EXCLUSIVE
+      (CMD_CCTRL_LOAD (hit))
+      (CMD_CCTRL_STORE
+         (hit)
+         (set_state MSI_MODIFIED)
+      )
+      (CMD_CCTRL_EVICT
+         (send_query CMD_CCTRL_PUT_MODIFIED)
+         (set_state MSI_EI_B)
+      )
+
+      (bus_access (none))
+
+      (CMD_DATA_MSG (none))
+      (CMD_DATA_EXCLUSIVE_MSG (none))
+      (CMD_NO_DATA_MSG (none))
+
+      (CMD_CCTRL_GET_SHARED
+         (memory!CMD_NO_DATA_MSG)
+         (sender!CMD_DATA_MSG)
+         (set_state MSI_SHARED)
+      )
+      (CMD_CCTRL_GET_MODIFIED
+         (sender!CMD_DATA_MSG)
+         (set_state MSI_INVALID)
+      )
+      (CMD_CCTRL_PUT_MODIFIED (ignore))
+   )
+
+   (MSI_IE_B
+      (CMD_CCTRL_LOAD (stall))
+      (CMD_CCTRL_STORE (stall))
+      (CMD_CCTRL_EVICT (stall))
+
+      (bus_access (set_state MSI_EXCLUSIVE))
+
+      (CMD_DATA_MSG (none))
+      (CMD_DATA_EXCLUSIVE_MSG (none))
+      (CMD_NO_DATA_MSG (none))
+
+      (CMD_CCTRL_GET_SHARED (ignore))
+      (CMD_CCTRL_GET_MODIFIED (ignore))
+      (CMD_CCTRL_PUT_MODIFIED (ignore))
+   )
+
+   (MSI_EI_B
+      (CMD_CCTRL_LOAD (hit))
+      (CMD_CCTRL_STORE (stall))
+      (CMD_CCTRL_EVICT (stall))
+
+      (bus_access
+         (memory!CMD_NO_DATA_MSG)
+         (set_state MSI_INVALID)
+      )
+
+      (CMD_DATA_MSG (none))
+      (CMD_DATA_EXCLUSIVE_MSG (none))
+      (CMD_NO_DATA_MSG (none))
+
+      (CMD_CCTRL_GET_SHARED
+         (memory!CMD_NO_DATA_MSG)
+         (sender!CMD_DATA_MSG)
+         (set_state MSI_II_B)
+      )
+      (CMD_CCTRL_GET_MODIFIED
+         (sender!CMD_DATA_MSG)
+         (set_state MSI_II_B)
+      )
+      (CMD_CCTRL_PUT_MODIFIED (ignore))
+   )
+
+   (MSI_FI_B
+      (CMD_CCTRL_LOAD (hit))
+      (CMD_CCTRL_STORE (stall))
+      (CMD_CCTRL_EVICT (stall))
+
+      (bus_access (set_state MSI_INVALID))
+
+      (CMD_DATA_MSG (none))
+      (CMD_DATA_EXCLUSIVE_MSG (none))
+      (CMD_NO_DATA_MSG (none))
+
+      (CMD_CCTRL_GET_SHARED
+         (sender!CMD_DATA_MSG)
+         (set_state MSI_II_B)
+      )
+      (CMD_CCTRL_GET_MODIFIED
+         (sender!CMD_DATA_MSG)
+         (set_state MSI_II_B)
+      )
+      (CMD_CCTRL_PUT_MODIFIED (ignore))
+   )
+)
+
+(define_coherency_manager
+   (add_state stable MEM_M)
+   (add_state stable MEM_S)
+   (add_state stable MEM_I)
+
+   (set_default_state MEM_I)
+
+   (add_state transient MEM_I_D)
+   (add_state transient MEM_I_O_S_B)
+   (add_state transient MEM_S_D)
+
+   (MEM_I
+      (CMD_CCTRL_GET_SHARED
+         (read_data)
+         (sender!CMD_DATA_EXCLUSIVE_MSG)
+         (store_owner)
+         (set_state MEM_M)
+      )
+      (CMD_CCTRL_GET_MODIFIED
+         (sender!CMD_DATA_MSG)
+         (store_owner)
+         (set_state MEM_M)
+      )
+      (CMD_CCTRL_PUT_MODIFIED
+         (if_is_owner (none) (ignore))
+      )
+
+      (CMD_DATA_MSG (none))
+      (CMD_DATA_EXCLUSIVE_MSG (none))
+   )
+
+   (MEM_M
+      (CMD_CCTRL_GET_SHARED
+         (reset_owner)
+         (set_state MEM_S_D)
+      )
+      (CMD_CCTRL_GET_MODIFIED
+         (store_owner)
+      )
+      (CMD_CCTRL_PUT_MODIFIED
+         (if_is_owner
+            (
+               (reset_owner)
+               (set_state MEM_I_D)
+            )
+            (ignore)
+         )
+      )
+
+      (CMD_DATA_MSG
+         (write_data)
+         (resume)
+         (set_state MEM_I_O_S_B)
+      )
+      (CMD_DATA_EXCLUSIVE_MSG (none))
+   )
+
+   (MEM_I_D
+      (CMD_CCTRL_GET_SHARED (stall))
+      (CMD_CCTRL_GET_MODIFIED (stall))
+
+      (CMD_CCTRL_PUT_MODIFIED
+         (if_is_owner (none) (ignore))
+      )
+
+      (CMD_DATA_MSG
+         (write_data)
+         (resume)
+         (set_state MEM_I)
+      )
+      (CMD_DATA_EXCLUSIVE_MSG (resume) (set_state MEM_I))
+   )
+
+   (MEM_S_D
+      (CMD_CCTRL_GET_SHARED (stall))
+      (CMD_CCTRL_GET_MODIFIED (stall))
+
+      (CMD_CCTRL_PUT_MODIFIED
+         (if_is_owner (none) (ignore))
+      )
+
+      (CMD_DATA_MSG
+         (write_data)
+         (resume)
+         (set_state MEM_S)
+      )
+      (CMD_DATA_EXCLUSIVE_MSG
+         (resume)
+         (set_state MEM_S)
+      )
+   )
+
+   (MEM_I_O_S_B
+      (CMD_CCTRL_GET_SHARED
+         (reset_owner)
+         (set_state MEM_S)
+      )
+      (CMD_CCTRL_GET_MODIFIED
+         (store_owner)
+      )
+
+      (CMD_CCTRL_PUT_MODIFIED
+         (if_is_owner
+            (
+               (reset_owner)
+               (set_state MEM_I)
+            )
+            (ignore)
+         )
+      )
+
+      (CMD_DATA_MSG (none))
+      (CMD_DATA_EXCLUSIVE_MSG (none))
+   )
+
+   (MEM_S
+      (CMD_CCTRL_GET_SHARED
+         (read_data)
+         (sender!CMD_DATA_MSG)
+      )
+      (CMD_CCTRL_GET_MODIFIED
+         (sender!CMD_DATA_MSG)
+         (store_owner)
+         (set_state MEM_M)
+      )
+
+      (CMD_CCTRL_PUT_MODIFIED
+         (if_is_owner (none) (ignore))
+      )
+
+      (CMD_DATA_MSG (none))
+      (CMD_DATA_EXCLUSIVE_MSG (none))
+   )
+
+   (MEM_F
+      (CMD_CCTRL_GET_SHARED
+         (store_owner)
+      )
+      (CMD_CCTRL_GET_MODIFIED
+         (store_owner)
+         (set_state MEM_M)
+      )
+
+      (CMD_CCTRL_PUT_MODIFIED
+         (if_is_owner
+            (
+               (reset_owner)
+               (set_state MEM_S)
+            )
+            (ignore)
+         )
+      )
+
+      (CMD_DATA_MSG
+         (write_data)
+         (resume)
+         (set_state MEM_I_O_S_B)
+      )
+      (CMD_DATA_EXCLUSIVE_MSG (none))
+   )
+)
