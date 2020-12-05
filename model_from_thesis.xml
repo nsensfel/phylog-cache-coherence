@@ -19,6 +19,19 @@ const int LINES_PER_CACHE = 20;
 const int COMPONENT_COUNT = 16;
 
 const bool USE_LOCK_FREE_CACHES = true;
+/******************************************************************************/
+/** Query Targets *************************************************************/
+/******************************************************************************/
+/* Simplifies query writing */
+const int target_addr = 9;
+const int target_addr2 = 4;
+/*
+ * WARNING:
+ * Make sure you see the "Upload new Model to Server" prompt after changing the value above.
+ * If it didn't pop up, ignore the result and try again by modifying the file in some way.
+ * Editing comments works. dddsfsfsdds
+ */
+
 
 /******************************************************************************/
 /** Types *********************************************************************/
@@ -29,7 +42,7 @@ const bool USE_LOCK_FREE_CACHES = true;
 *  Identifier corresponding to a request (i.e. LOAD/STORE/EVICT) or
 *  query (e.g. GETS/GETM/PUTM).
 */
-typedef int[0,/*[EVENT_TYPE_COUNT]*/8/*[/EVENT_TYPE_COUNT]*/] cmd_id_t;
+typedef int[0,/*[EVENT_TYPE_COUNT]*/9/*[/EVENT_TYPE_COUNT]*/] cmd_id_t;
 
 /* Data and instruction addresses */
 typedef int[0,LAST_ADDR] addr_t;
@@ -49,9 +62,16 @@ const interference_id_t INTERFERENCE_EXPELLING = 2;
 typedef struct
 {
    cmp_id_t author;
+   int iline;
    addr_t addr;
    cmd_id_t cmd;
 } query_t;
+
+typedef struct
+{
+   cmp_id_t author;
+   int iline;
+} interference_origin_t;
 
 /******************************************************************************/
 /** Constants &amp; Limits ********************************************************/
@@ -82,6 +102,7 @@ const cmd_id_t CMD_CCTRL_LOAD = 4;
 const cmd_id_t CMD_DATA_MSG = 5;
 const cmd_id_t CMD_CCTRL_EVICT = 6;
 const cmd_id_t CMD_CCTRL_GET_MODIFIED = 7;
+const cmd_id_t CMD_DATA_EXCLUSIVE_MSG = 8;
 /*[/EVENTS_DECLARATION]*/
 
 /*
@@ -104,8 +125,15 @@ const int CLOCK_CYCLE_TIME = 50;
 const query_t DEFAULT_QUERY_VALUE =
     {
         /* author = */ CMP_ID_T_NULL,
+        /* iline = */ -1,
         /* addr = */ ADDR_T_NULL,
         /* cmd = */ CMD_DATA_MSG
+    };
+
+const interference_origin_t DEFAULT_ORIGIN_VALUE =
+    {
+        /* author = */ CMP_ID_T_NULL,
+        /* iline = */ -1
     };
 
 /******************************************************************************/
@@ -227,16 +255,18 @@ an "urgent" one.</label>
 /** Types *********************************************************************/
 /******************************************************************************/
 /* Status of a "coherency" line (real value in RAM vs real value in cache). */
-typedef int[0,/*[CMGR_STATES_COUNT]*/4/*[/CMGR_STATES_COUNT]*/] mem_state_t;
+typedef int[0,/*[CMGR_STATES_COUNT]*/6/*[/CMGR_STATES_COUNT]*/] mem_state_t;
 
 /* index of a "coherency" line in this automaton's status tracking array. */
 typedef int[-1,MAX_AMOUNT_OF_CACHED_LINES] cache_line_status_ix_t;
 
 /*[CMGR_STATES_DECLARATION]*/
-const mem_state_t MEM_U = 0;
-const mem_state_t MEM_U_D = 1;
-const mem_state_t MEM_U_B = 2;
-const mem_state_t MEM_M = 3;
+const mem_state_t MEM_I = 0;
+const mem_state_t MEM_I_D = 1;
+const mem_state_t MEM_S = 2;
+const mem_state_t MEM_I_O_S_B = 3;
+const mem_state_t MEM_S_D = 4;
+const mem_state_t MEM_M = 5;
 /*[/CMGR_STATES_DECLARATION]*/
 
 /* (address, status) couple for the status tracking array. */
@@ -292,7 +322,7 @@ cache_line_status_ix_t current_line = -1;
 const cache_line_status_t DEFAULT_CACHE_LINE_STATUS_VALUE =
    {
       /* addr = */ ADDR_T_NULL,
-      /* c_state = */ /*[CMGR_DEFAULT_STATE]*/MEM_U/*[/CMGR_DEFAULT_STATE]*/,
+      /* c_state = */ /*[CMGR_DEFAULT_STATE]*/MEM_I/*[/CMGR_DEFAULT_STATE]*/,
       /* owner = */ CMP_ID_T_NULL
    };
 
@@ -324,7 +354,7 @@ cache_line_status_ix_t get_line_of (const addr_t addr)
       if
       (
          (result == -1)
-         &amp;&amp; (cache_line_status[i].m_state == /*[CMGR_DEFAULT_STATE]*/MEM_U/*[/CMGR_DEFAULT_STATE]*/)
+         &amp;&amp; (cache_line_status[i].m_state == /*[CMGR_DEFAULT_STATE]*/MEM_I/*[/CMGR_DEFAULT_STATE]*/)
       )
       {
          /*
@@ -397,106 +427,129 @@ void action_send_data_to_sender (const cmd_id_t data_type)
 /*[CMGR_HANDLE_QUERY_FUNCTIONS]*/
 void handle_CMD_CCTRL_GET_SHARED ()
 {
-   if (meta_state == MEM_U)
+   if (meta_state == MEM_I)
    {
-      // Action from l.481 c. 10
-      action_send_data_to_sender(CMD_DATA_MSG);
-      // Action from l.482 c. 10
+      // Action from l.628 c. 10
       action_read_data();
+      // Action from l.629 c. 10
+      action_send_data_to_sender(CMD_DATA_EXCLUSIVE_MSG);
+      // Action from l.630 c. 10
+      action_store_reply_to();
+      // Action from l.631 c. 10
+      action_set_state(MEM_M);
    }
-   else if (meta_state == MEM_U_D)
+   else if (meta_state == MEM_I_D)
    {
-      // Action from l.498 c. 29
+      // Action from l.674 c. 29
       action_stall();
    }
-   else if (meta_state == MEM_U_B)
+   else if (meta_state == MEM_S)
    {
-      // Action from l.513 c. 10
+      // Action from l.734 c. 10
+      action_read_data();
+      // Action from l.735 c. 10
+      action_send_data_to_sender(CMD_DATA_MSG);
+   }
+   else if (meta_state == MEM_I_O_S_B)
+   {
+      // Action from l.710 c. 10
       action_reset_reply_to();
-      // Action from l.514 c. 10
-      action_set_state(MEM_U);
+      // Action from l.711 c. 10
+      action_set_state(MEM_S);
+   }
+   else if (meta_state == MEM_S_D)
+   {
+      // Action from l.690 c. 29
+      action_stall();
    }
    else if (meta_state == MEM_M)
    {
-      // Action from l.532 c. 10
+      // Action from l.649 c. 10
       action_reset_reply_to();
-      // Action from l.533 c. 10
-      action_set_state(MEM_U_D);
+      // Action from l.650 c. 10
+      action_set_state(MEM_S_D);
    }
 }
 void handle_CMD_CCTRL_GET_MODIFIED ()
 {
-   if (meta_state == MEM_U)
+   if (meta_state == MEM_I)
    {
-      // Action from l.485 c. 10
-      action_send_data_to_sender(CMD_DATA_MSG);
-      // Action from l.486 c. 10
-      action_store_reply_to();
-      // Action from l.487 c. 10
-      action_set_state(MEM_M);
-      // Action from l.488 c. 10
+      // Action from l.634 c. 10
       action_read_data();
+      // Action from l.635 c. 10
+      action_send_data_to_sender(CMD_DATA_MSG);
+      // Action from l.636 c. 10
+      action_store_reply_to();
+      // Action from l.637 c. 10
+      action_set_state(MEM_M);
    }
-   else if (meta_state == MEM_U_D)
+   else if (meta_state == MEM_I_D)
    {
-      // Action from l.499 c. 31
+      // Action from l.675 c. 31
+      action_stall();
+   }
+   else if (meta_state == MEM_S)
+   {
+      // Action from l.738 c. 10
+      action_read_data();
+      // Action from l.739 c. 10
+      action_send_data_to_sender(CMD_DATA_MSG);
+      // Action from l.740 c. 10
+      action_store_reply_to();
+      // Action from l.741 c. 10
+      action_set_state(MEM_M);
+   }
+   else if (meta_state == MEM_I_O_S_B)
+   {
+      // Action from l.714 c. 10
+      action_store_reply_to();
+   }
+   else if (meta_state == MEM_S_D)
+   {
+      // Action from l.691 c. 31
       action_stall();
    }
    else if (meta_state == MEM_M)
    {
-      // Action from l.536 c. 10
+      // Action from l.653 c. 10
       action_store_reply_to();
    }
 }
 void handle_CMD_CCTRL_PUT_MODIFIED ()
 {
-   if (meta_state == MEM_U_D)
+   if (meta_state == MEM_I_O_S_B)
    {
-      // Action from l.501 c. 10
+      // Action from l.719 c. 10
       if (meta_is_owner)
       {
-         // Action from l.501 c. 23
-         action_stall();
-      }
-      else
-      {
-         // Action from l.501 c. 31
-         // (ignore)
-      }
-   }
-   else if (meta_state == MEM_U_B)
-   {
-      // Action from l.518 c. 10
-      if (meta_is_owner)
-      {
-         // Action from l.519 c. 12
+         // Action from l.720 c. 12
          // (sequence)
-         // Action from l.520 c. 16
+         // Action from l.721 c. 16
          action_reset_reply_to();
-         // Action from l.521 c. 16
-         action_set_state(MEM_U);
+         // Action from l.722 c. 16
+         action_set_state(MEM_I);
       }
       else
       {
-         // Action from l.523 c. 13
+         // Action from l.724 c. 13
          // (ignore)
       }
    }
    else if (meta_state == MEM_M)
    {
-      // Action from l.539 c. 10
+      // Action from l.656 c. 10
       if (meta_is_owner)
       {
-         // Action from l.540 c. 12
+         // Action from l.657 c. 12
          // (sequence)
-         // Action from l.541 c. 16
+         // Action from l.658 c. 16
          action_reset_reply_to();
-         // Action from l.542 c. 16
-         action_set_state(MEM_U_D);
+         // Action from l.659 c. 16
+         action_set_state(MEM_I_D);
       }
       else
       {
-         // Action from l.544 c. 13
+         // Action from l.661 c. 13
          // (ignore)
       }
    }
@@ -620,23 +673,49 @@ void action_resume ()
 /*[CMGR_HANDLE_DATA_FUNCTIONS]*/
 void handle_CMD_DATA_MSG ()
 {
-   if (meta_state == MEM_U_D)
+   if (meta_state == MEM_I_D)
    {
-      // Action from l.505 c. 10
+      // Action from l.682 c. 10
       action_write_data();
-      // Action from l.506 c. 10
+      // Action from l.683 c. 10
       action_resume();
-      // Action from l.507 c. 10
-      action_set_state(MEM_U);
+      // Action from l.684 c. 10
+      action_set_state(MEM_I);
+   }
+   else if (meta_state == MEM_S_D)
+   {
+      // Action from l.698 c. 10
+      action_write_data();
+      // Action from l.699 c. 10
+      action_resume();
+      // Action from l.700 c. 10
+      action_set_state(MEM_S);
    }
    else if (meta_state == MEM_M)
    {
-      // Action from l.549 c. 10
+      // Action from l.666 c. 10
       action_write_data();
-      // Action from l.550 c. 10
+      // Action from l.667 c. 10
       action_resume();
-      // Action from l.551 c. 10
-      action_set_state(MEM_U_B);
+      // Action from l.668 c. 10
+      action_set_state(MEM_I_O_S_B);
+   }
+}
+void handle_CMD_DATA_EXCLUSIVE_MSG ()
+{
+   if (meta_state == MEM_I_D)
+   {
+      // Action from l.686 c. 31
+      action_resume();
+      // Action from l.686 c. 40
+      action_set_state(MEM_I);
+   }
+   else if (meta_state == MEM_S_D)
+   {
+      // Action from l.703 c. 10
+      action_resume();
+      // Action from l.704 c. 10
+      action_set_state(MEM_S);
    }
 }
 /*[/CMGR_HANDLE_DATA_FUNCTIONS]*/
@@ -653,6 +732,10 @@ void parse_data_input ()
    if (req_in == CMD_DATA_MSG)
    {
       handle_CMD_DATA_MSG();
+   }
+   else if (req_in == CMD_DATA_EXCLUSIVE_MSG)
+   {
+      handle_CMD_DATA_EXCLUSIVE_MSG();
    }
    /*[/CMGR_DATA_SWITCH]*/
 }
@@ -688,8 +771,8 @@ void initialize ()
 		<location id="id1" x="-340" y="-153">
 			<name x="-366" y="-145">S1</name>
 		</location>
-		<location id="id2" x="-25" y="-17">
-			<name x="-50" y="-42">S2</name>
+		<location id="id2" x="0" y="-17">
+			<name x="-25" y="-42">S2</name>
 		</location>
 		<location id="id3" x="-493" y="-17">
 			<name x="-544" y="-8">Ready</name>
@@ -708,7 +791,7 @@ void initialize ()
 			<label kind="assignment" x="-323" y="136">send_data_out(),
 clean()</label>
 			<label kind="comments" x="-212" y="161">T7</label>
-			<nail x="-25" y="76"/>
+			<nail x="0" y="76"/>
 			<nail x="-178" y="76"/>
 			<nail x="-178" y="187"/>
 			<nail x="-493" y="187"/>
@@ -716,21 +799,21 @@ clean()</label>
 		<transition>
 			<source ref="id3"/>
 			<target ref="id2"/>
-			<label kind="guard" x="-170" y="-144">was_stalling</label>
-			<label kind="synchronisation" x="-170" y="-127">FORCE_URGENT!</label>
-			<label kind="assignment" x="-170" y="-110">pop_stalled_query(),
+			<label kind="guard" x="-119" y="-144">was_stalling</label>
+			<label kind="synchronisation" x="-178" y="-127">FORCE_EXTRA_URGENT!</label>
+			<label kind="assignment" x="-145" y="-110">pop_stalled_query(),
 parse_request(),
 was_stalling = FALSE</label>
-			<label kind="comments" x="-59" y="-144">T1</label>
+			<label kind="comments" x="-34" y="-144">T1</label>
 			<nail x="-187" y="-17"/>
 			<nail x="-187" y="-153"/>
-			<nail x="-25" y="-153"/>
+			<nail x="0" y="-153"/>
 		</transition>
 		<transition>
 			<source ref="id1"/>
 			<target ref="id3"/>
 			<label kind="guard" x="-467" y="-110">!should_write()</label>
-			<label kind="synchronisation" x="-467" y="-93">FORCE_URGENT!</label>
+			<label kind="synchronisation" x="-518" y="-93">FORCE_EXTRA_URGENT!</label>
 			<label kind="assignment" x="-467" y="-76">clean()</label>
 			<label kind="comments" x="-374" y="-76">T4</label>
 			<nail x="-340" y="-51"/>
@@ -757,7 +840,7 @@ was_stalling = FALSE</label>
 			<label kind="assignment" x="-484" y="136">send_query_to_mem(),
 clean()</label>
 			<label kind="comments" x="-365" y="161">T8</label>
-			<nail x="-25" y="76"/>
+			<nail x="0" y="76"/>
 			<nail x="-331" y="76"/>
 			<nail x="-331" y="187"/>
 			<nail x="-493" y="187"/>
@@ -766,18 +849,18 @@ clean()</label>
 			<source ref="id2"/>
 			<target ref="id3"/>
 			<label kind="guard" x="-484" y="-1">!should_reply()</label>
-			<label kind="synchronisation" x="-485" y="16">FORCE_URGENT!</label>
+			<label kind="synchronisation" x="-485" y="16">FORCE_EXTRA_URGENT!</label>
 			<label kind="assignment" x="-484" y="33">clean()</label>
 			<label kind="comments" x="-433" y="34">T6</label>
-			<nail x="-25" y="76"/>
+			<nail x="0" y="76"/>
 			<nail x="-493" y="76"/>
 		</transition>
 		<transition>
 			<source ref="id3"/>
 			<target ref="id2"/>
-			<label kind="guard" x="-229" y="-17">!was_stalling &amp;&amp; !is_stalling</label>
-			<label kind="synchronisation" x="-153" y="0">QUERY_IN[ID]?</label>
-			<label kind="assignment" x="-153" y="16">parse_request()</label>
+			<label kind="guard" x="-204" y="-17">!was_stalling &amp;&amp; !is_stalling</label>
+			<label kind="synchronisation" x="-128" y="0">QUERY_IN[ID]?</label>
+			<label kind="assignment" x="-128" y="16">parse_request()</label>
 			<label kind="comments" x="-178" y="0">T2</label>
 		</transition>
 		<transition>
@@ -1770,30 +1853,34 @@ typedef int[-1,LINES_PER_CACHE] cache_line_ix_t;
 typedef int[0,LINES_PER_CACHE] cache_line_last_use_t;
 
 /* Status of a cache line. */
-typedef int[0,/*[CC_STATES_COUNT]*/21/*[/CC_STATES_COUNT]*/] msi_state_t;
+typedef int[0,/*[CC_STATES_COUNT]*/25/*[/CC_STATES_COUNT]*/] msi_state_t;
 
 /*[CC_STATES_DECLARATION]*/
-const msi_state_t MSI_IM_BD = 0;
-const msi_state_t MSI_IM_D_SI = 1;
-const msi_state_t MSI_MODIFIED = 2;
-const msi_state_t MSI_SHARED = 3;
-const msi_state_t MSI_IS_D = 4;
-const msi_state_t MSI_IS_B = 5;
-const msi_state_t MSI_SM_D = 6;
-const msi_state_t MSI_SM_D_SI = 7;
-const msi_state_t MSI_IM_D_I = 8;
-const msi_state_t MSI_IS_D_I = 9;
-const msi_state_t MSI_SM_B = 10;
-const msi_state_t MSI_IM_D = 11;
-const msi_state_t MSI_MI_B = 12;
-const msi_state_t MSI_IM_B = 13;
-const msi_state_t MSI_II_B = 14;
-const msi_state_t MSI_INVALID = 15;
-const msi_state_t MSI_SM_D_S = 16;
-const msi_state_t MSI_SM_BD = 17;
-const msi_state_t MSI_IS_BD = 18;
-const msi_state_t MSI_SM_D_I = 19;
-const msi_state_t MSI_IM_D_S = 20;
+const msi_state_t MSI_IM_D_SI = 0;
+const msi_state_t MSI_MODIFIED = 1;
+const msi_state_t MSI_IS_D = 2;
+const msi_state_t MSI_IS_B = 3;
+const msi_state_t MSI_SM_D_SI = 4;
+const msi_state_t MSI_IM_D = 5;
+const msi_state_t MSI_IM_B = 6;
+const msi_state_t MSI_EI_B = 7;
+const msi_state_t MSI_IEOS_D = 8;
+const msi_state_t MSI_IS_BD = 9;
+const msi_state_t MSI_IM_BD = 10;
+const msi_state_t MSI_SHARED = 11;
+const msi_state_t MSI_SM_D = 12;
+const msi_state_t MSI_IM_D_I = 13;
+const msi_state_t MSI_IS_D_I = 14;
+const msi_state_t MSI_SM_B = 15;
+const msi_state_t MSI_MI_B = 16;
+const msi_state_t MSI_II_B = 17;
+const msi_state_t MSI_INVALID = 18;
+const msi_state_t MSI_IE_B = 19;
+const msi_state_t MSI_SM_D_S = 20;
+const msi_state_t MSI_SM_BD = 21;
+const msi_state_t MSI_EXCLUSIVE = 22;
+const msi_state_t MSI_SM_D_I = 23;
+const msi_state_t MSI_IM_D_S = 24;
 /*[/CC_STATES_DECLARATION]*/
 
 typedef struct
@@ -1825,12 +1912,15 @@ typedef struct
    int instruction_addr;
 
    bool is_cache_hit;
+   interference_origin_t interference_origin;
+   interference_id_t interference_type;
 } pending_request_t;
 
 typedef struct
 {
     int hit;
     int miss;
+    interference_origin_t last_origin;
     int interference_count[INTERFERENCE_TYPES];
     int potential_interference_count[INTERFERENCE_TYPES];
     bool is_being[INTERFERENCE_TYPES];
@@ -1950,6 +2040,20 @@ void set_relevant_line_to (const msi_state_t i_state)
 }
 
 /******************************************************************************/
+/** CPU Request Management Variables ******************************************/
+/******************************************************************************/
+/*
+ * Stalled, active, and completed (but not yet acknowledged) requests.
+ * These requests are stored in a FIFO order.
+ */
+pending_request_t pending_requests[REQ_BUFFER_SIZE];
+pending_request_t completed_requests[REQ_BUFFER_SIZE];
+pending_request_t blocked_request;
+
+/* Index of the request related to the current operation. */
+pending_request_ix_t current_request = -1;
+
+/******************************************************************************/
 /** Cache Request Info ********************************************************/
 /******************************************************************************/
 cache_local_address_info_t cache_local_address_infos[ADDRESSES_COUNT];
@@ -1968,33 +2072,68 @@ void action_mark_interference (const interference_id_t interference)
    cache_local_address_infos[addr].potential_interference_count[INTERFERENCE_MINOR] -= 1;
    cache_local_address_infos[addr].potential_interference_count[interference] += 1;
    cache_local_address_infos[addr].is_being[interference] = TRUE;
+
+   cache_local_address_infos[addr].last_origin.author = transient_msg.cmp_id_t_params[CMP_ID_T_EMITTER_PARAM];
+   cache_local_address_infos[addr].last_origin.iline = transient_msg.int_t_param;
+}
+
+void store_interference_origin
+(
+    const interference_origin_t origin,
+    const interference_id_t type
+)
+{
+   if (meta_is_unstalling)
+   {
+      pending_requests[current_request].interference_origin = origin;
+      pending_requests[current_request].interference_type = type;
+      meta_current_request.interference_origin = origin;
+      meta_current_request.interference_type = type;
+   }
+   else
+   {
+      meta_current_request.interference_origin = origin;
+      meta_current_request.interference_type = type;
+   }
 }
 
 void clear_interference_by_reading ()
 {
-   const addr_t addr = cache_lines[current_line].addr;
+   /* Using const here will crash UPPAAL. */
+   addr_t addr = cache_lines[current_line].addr;
 
    if (cache_local_address_infos[addr].is_being[INTERFERENCE_EXPELLING])
    {
       cache_local_address_infos[addr].is_being[INTERFERENCE_EXPELLING] = FALSE;
       cache_local_address_infos[addr].interference_count[INTERFERENCE_EXPELLING] += 1;
+      store_interference_origin(cache_local_address_infos[addr].last_origin, INTERFERENCE_EXPELLING);
+      cache_local_address_infos[addr].last_origin = DEFAULT_ORIGIN_VALUE;
    }
 }
 
 void clear_interference_by_writing ()
 {
-   const addr_t addr = cache_lines[current_line].addr;
-
-   if (cache_local_address_infos[addr].is_being[INTERFERENCE_EXPELLING])
-   {
-      cache_local_address_infos[addr].is_being[INTERFERENCE_EXPELLING] = FALSE;
-      cache_local_address_infos[addr].interference_count[INTERFERENCE_EXPELLING] += 1;
-   }
+   /* Using const here will crash UPPAAL. */
+   addr_t addr = cache_lines[current_line].addr;
 
    if (cache_local_address_infos[addr].is_being[INTERFERENCE_DEMOTING])
    {
       cache_local_address_infos[addr].is_being[INTERFERENCE_DEMOTING] = FALSE;
       cache_local_address_infos[addr].interference_count[INTERFERENCE_DEMOTING] += 1;
+
+      if (!cache_local_address_infos[addr].is_being[INTERFERENCE_EXPELLING])
+      {
+         store_interference_origin(cache_local_address_infos[addr].last_origin, INTERFERENCE_DEMOTING);
+         cache_local_address_infos[addr].last_origin = DEFAULT_ORIGIN_VALUE;
+      }
+   }
+
+   if (cache_local_address_infos[addr].is_being[INTERFERENCE_EXPELLING])
+   {
+      cache_local_address_infos[addr].is_being[INTERFERENCE_EXPELLING] = FALSE;
+      cache_local_address_infos[addr].interference_count[INTERFERENCE_EXPELLING] += 1;
+      store_interference_origin(cache_local_address_infos[addr].last_origin, INTERFERENCE_EXPELLING);
+      cache_local_address_infos[addr].last_origin = DEFAULT_ORIGIN_VALUE;
    }
 }
 
@@ -2034,24 +2173,15 @@ void propagate_use_count (const cache_line_ix_t line_being_used)
 /******************************************************************************/
 /** CPU Request Management ****************************************************/
 /******************************************************************************/
-/*
- * Stalled, active, and completed (but not yet acknowledged) requests.
- * These requests are stored in a FIFO order.
- */
-pending_request_t pending_requests[REQ_BUFFER_SIZE];
-pending_request_t completed_requests[REQ_BUFFER_SIZE];
-pending_request_t blocked_request;
-
-/* Index of the request related to the current operation. */
-pending_request_ix_t current_request = -1;
-
 const pending_request_t DEFAULT_PENDING_REQUEST_VALUE =
    {
       /* requester = */  0,
       /* addr = */ ADDR_T_NULL,
       /* cmd = */ 0,
       /* instruction_addr = */ -1,
-      /* is_cache_hit = */ TRUE
+      /* is_cache_hit = */ TRUE,
+      /* interference_origin = */ DEFAULT_ORIGIN_VALUE,
+      /* interference_type = */ INTERFERENCE_MINOR
    };
 
 /**** Internal ****************************************************************/
@@ -2259,425 +2389,510 @@ void action_send_query (const cmd_id_t query_cmd)
    // Can't do that: it might not have been set yet.
    // current_query.addr = cache_lines[current_line].addr;
    current_query.addr = meta_current_request.addr;
+   current_query.iline = meta_current_request.instruction_addr;
    current_query.cmd = query_cmd;
 }
 
 /*[CC_HANDLE_STALLED_REQUEST]*/
 void handle_stalled_CMD_CCTRL_LOAD ()
 {
-   if (meta_state == MSI_IM_BD)
+   if (meta_state == MSI_IM_D_SI)
    {
-      // Action from l.127 c. 23
-      action_stall();
-   }
-   else if (meta_state == MSI_IM_D_SI)
-   {
-      // Action from l.231 c. 23
+      // Action from l.290 c. 23
       action_stall();
    }
    else if (meta_state == MSI_MODIFIED)
    {
       // Action from l.-1 c. -1
-      action_propagate_use_count();
-      // Action from l.-1 c. -1
       action_clear_interference_by(CMD_CCTRL_LOAD);
-      // Action from l.402 c. 23
-      action_succeed();
-   }
-   else if (meta_state == MSI_SHARED)
-   {
       // Action from l.-1 c. -1
       action_propagate_use_count();
-      // Action from l.-1 c. -1
-      action_clear_interference_by(CMD_CCTRL_LOAD);
-      // Action from l.251 c. 23
+      // Action from l.469 c. 23
       action_succeed();
    }
    else if (meta_state == MSI_IS_D)
    {
-      // Action from l.90 c. 23
+      // Action from l.97 c. 23
       action_stall();
    }
    else if (meta_state == MSI_IS_B)
    {
-      // Action from l.73 c. 23
+      // Action from l.79 c. 23
       action_stall();
-   }
-   else if (meta_state == MSI_SM_D)
-   {
-      // Action from l.-1 c. -1
-      action_propagate_use_count();
-      // Action from l.-1 c. -1
-      action_clear_interference_by(CMD_CCTRL_LOAD);
-      // Action from l.315 c. 23
-      action_succeed();
    }
    else if (meta_state == MSI_SM_D_SI)
    {
       // Action from l.-1 c. -1
+      action_clear_interference_by(CMD_CCTRL_LOAD);
+      // Action from l.-1 c. -1
       action_propagate_use_count();
+      // Action from l.448 c. 23
+      action_succeed();
+   }
+   else if (meta_state == MSI_IM_D)
+   {
+      // Action from l.218 c. 23
+      action_stall();
+   }
+   else if (meta_state == MSI_IM_B)
+   {
+      // Action from l.200 c. 23
+      action_stall();
+   }
+   else if (meta_state == MSI_EI_B)
+   {
       // Action from l.-1 c. -1
       action_clear_interference_by(CMD_CCTRL_LOAD);
-      // Action from l.382 c. 23
+      // Action from l.-1 c. -1
+      action_propagate_use_count();
+      // Action from l.588 c. 23
+      action_succeed();
+   }
+   else if (meta_state == MSI_IEOS_D)
+   {
+      // Action from l.126 c. 23
+      action_stall();
+   }
+   else if (meta_state == MSI_IS_BD)
+   {
+      // Action from l.64 c. 23
+      action_stall();
+   }
+   else if (meta_state == MSI_IM_BD)
+   {
+      // Action from l.181 c. 23
+      action_stall();
+   }
+   else if (meta_state == MSI_SHARED)
+   {
+      // Action from l.-1 c. -1
+      action_clear_interference_by(CMD_CCTRL_LOAD);
+      // Action from l.-1 c. -1
+      action_propagate_use_count();
+      // Action from l.311 c. 23
+      action_succeed();
+   }
+   else if (meta_state == MSI_SM_D)
+   {
+      // Action from l.-1 c. -1
+      action_clear_interference_by(CMD_CCTRL_LOAD);
+      // Action from l.-1 c. -1
+      action_propagate_use_count();
+      // Action from l.378 c. 23
       action_succeed();
    }
    else if (meta_state == MSI_IM_D_I)
    {
-      // Action from l.188 c. 23
+      // Action from l.245 c. 23
       action_stall();
    }
    else if (meta_state == MSI_IS_D_I)
    {
-      // Action from l.110 c. 23
+      // Action from l.156 c. 23
       action_stall();
    }
    else if (meta_state == MSI_SM_B)
    {
       // Action from l.-1 c. -1
-      action_propagate_use_count();
-      // Action from l.-1 c. -1
       action_clear_interference_by(CMD_CCTRL_LOAD);
-      // Action from l.295 c. 23
+      // Action from l.-1 c. -1
+      action_propagate_use_count();
+      // Action from l.357 c. 23
       action_succeed();
-   }
-   else if (meta_state == MSI_IM_D)
-   {
-      // Action from l.162 c. 23
-      action_stall();
    }
    else if (meta_state == MSI_MI_B)
    {
       // Action from l.-1 c. -1
-      action_propagate_use_count();
-      // Action from l.-1 c. -1
       action_clear_interference_by(CMD_CCTRL_LOAD);
-      // Action from l.428 c. 23
+      // Action from l.-1 c. -1
+      action_propagate_use_count();
+      // Action from l.496 c. 23
       action_succeed();
-   }
-   else if (meta_state == MSI_IM_B)
-   {
-      // Action from l.145 c. 23
-      action_stall();
    }
    else if (meta_state == MSI_II_B)
    {
-      // Action from l.454 c. 23
+      // Action from l.523 c. 23
       action_stall();
    }
    else if (meta_state == MSI_INVALID)
    {
+      // Action from l.-1 c. -1
+      action_clear_interference_by(CMD_CCTRL_LOAD);
       // Action from l.-1 c. -1
       action_propagate_use_count();
       // Action from l.-1 c. -1
       action_mark_as_cache_miss();
       // Action from l.-1 c. -1
       action_acted();
-      // Action from l.-1 c. -1
-      action_clear_interference_by(CMD_CCTRL_LOAD);
-      // Action from l.38 c. 10
+      // Action from l.44 c. 10
       action_send_query(CMD_CCTRL_GET_SHARED);
-      // Action from l.39 c. 10
+      // Action from l.45 c. 10
       action_set_state(MSI_IS_BD);
+   }
+   else if (meta_state == MSI_IE_B)
+   {
+      // Action from l.570 c. 23
+      action_stall();
    }
    else if (meta_state == MSI_SM_D_S)
    {
       // Action from l.-1 c. -1
-      action_propagate_use_count();
-      // Action from l.-1 c. -1
       action_clear_interference_by(CMD_CCTRL_LOAD);
-      // Action from l.359 c. 23
+      // Action from l.-1 c. -1
+      action_propagate_use_count();
+      // Action from l.424 c. 23
       action_succeed();
    }
    else if (meta_state == MSI_SM_BD)
    {
       // Action from l.-1 c. -1
-      action_propagate_use_count();
-      // Action from l.-1 c. -1
       action_clear_interference_by(CMD_CCTRL_LOAD);
-      // Action from l.274 c. 23
+      // Action from l.-1 c. -1
+      action_propagate_use_count();
+      // Action from l.335 c. 23
       action_succeed();
    }
-   else if (meta_state == MSI_IS_BD)
+   else if (meta_state == MSI_EXCLUSIVE)
    {
-      // Action from l.59 c. 23
-      action_stall();
+      // Action from l.-1 c. -1
+      action_clear_interference_by(CMD_CCTRL_LOAD);
+      // Action from l.-1 c. -1
+      action_propagate_use_count();
+      // Action from l.540 c. 23
+      action_succeed();
    }
    else if (meta_state == MSI_SM_D_I)
    {
       // Action from l.-1 c. -1
-      action_propagate_use_count();
-      // Action from l.-1 c. -1
       action_clear_interference_by(CMD_CCTRL_LOAD);
-      // Action from l.340 c. 23
+      // Action from l.-1 c. -1
+      action_propagate_use_count();
+      // Action from l.404 c. 23
       action_succeed();
    }
    else if (meta_state == MSI_IM_D_S)
    {
-      // Action from l.208 c. 23
+      // Action from l.266 c. 23
       action_stall();
    }
 }
 void handle_stalled_CMD_CCTRL_STORE ()
 {
-   if (meta_state == MSI_IM_BD)
+   if (meta_state == MSI_IM_D_SI)
    {
-      // Action from l.128 c. 24
-      action_stall();
-   }
-   else if (meta_state == MSI_IM_D_SI)
-   {
-      // Action from l.232 c. 24
+      // Action from l.291 c. 24
       action_stall();
    }
    else if (meta_state == MSI_MODIFIED)
    {
       // Action from l.-1 c. -1
-      action_propagate_use_count();
-      // Action from l.-1 c. -1
       action_clear_interference_by(CMD_CCTRL_STORE);
-      // Action from l.403 c. 24
+      // Action from l.-1 c. -1
+      action_propagate_use_count();
+      // Action from l.470 c. 24
       action_succeed();
+   }
+   else if (meta_state == MSI_IS_D)
+   {
+      // Action from l.98 c. 24
+      action_stall();
+   }
+   else if (meta_state == MSI_IS_B)
+   {
+      // Action from l.80 c. 24
+      action_stall();
+   }
+   else if (meta_state == MSI_SM_D_SI)
+   {
+      // Action from l.449 c. 24
+      action_stall();
+   }
+   else if (meta_state == MSI_IM_D)
+   {
+      // Action from l.219 c. 24
+      action_stall();
+   }
+   else if (meta_state == MSI_IM_B)
+   {
+      // Action from l.201 c. 24
+      action_stall();
+   }
+   else if (meta_state == MSI_EI_B)
+   {
+      // Action from l.589 c. 24
+      action_stall();
+   }
+   else if (meta_state == MSI_IEOS_D)
+   {
+      // Action from l.127 c. 24
+      action_stall();
+   }
+   else if (meta_state == MSI_IS_BD)
+   {
+      // Action from l.65 c. 24
+      action_stall();
+   }
+   else if (meta_state == MSI_IM_BD)
+   {
+      // Action from l.182 c. 24
+      action_stall();
    }
    else if (meta_state == MSI_SHARED)
    {
+      // Action from l.-1 c. -1
+      action_clear_interference_by(CMD_CCTRL_STORE);
       // Action from l.-1 c. -1
       action_propagate_use_count();
       // Action from l.-1 c. -1
       action_mark_as_cache_miss();
       // Action from l.-1 c. -1
       action_acted();
-      // Action from l.-1 c. -1
-      action_clear_interference_by(CMD_CCTRL_STORE);
-      // Action from l.253 c. 10
+      // Action from l.313 c. 10
       action_send_query(CMD_CCTRL_GET_MODIFIED);
-      // Action from l.254 c. 10
+      // Action from l.314 c. 10
       action_set_state(MSI_SM_BD);
-   }
-   else if (meta_state == MSI_IS_D)
-   {
-      // Action from l.91 c. 24
-      action_stall();
-   }
-   else if (meta_state == MSI_IS_B)
-   {
-      // Action from l.74 c. 24
-      action_stall();
    }
    else if (meta_state == MSI_SM_D)
    {
-      // Action from l.316 c. 24
-      action_stall();
-   }
-   else if (meta_state == MSI_SM_D_SI)
-   {
-      // Action from l.383 c. 24
+      // Action from l.379 c. 24
       action_stall();
    }
    else if (meta_state == MSI_IM_D_I)
    {
-      // Action from l.189 c. 24
+      // Action from l.246 c. 24
       action_stall();
    }
    else if (meta_state == MSI_IS_D_I)
    {
-      // Action from l.111 c. 24
+      // Action from l.157 c. 24
       action_stall();
    }
    else if (meta_state == MSI_SM_B)
    {
-      // Action from l.296 c. 24
-      action_stall();
-   }
-   else if (meta_state == MSI_IM_D)
-   {
-      // Action from l.163 c. 24
+      // Action from l.358 c. 24
       action_stall();
    }
    else if (meta_state == MSI_MI_B)
    {
       // Action from l.-1 c. -1
-      action_propagate_use_count();
-      // Action from l.-1 c. -1
       action_clear_interference_by(CMD_CCTRL_STORE);
-      // Action from l.429 c. 24
+      // Action from l.-1 c. -1
+      action_propagate_use_count();
+      // Action from l.497 c. 24
       action_succeed();
-   }
-   else if (meta_state == MSI_IM_B)
-   {
-      // Action from l.146 c. 24
-      action_stall();
    }
    else if (meta_state == MSI_II_B)
    {
-      // Action from l.455 c. 24
+      // Action from l.524 c. 24
       action_stall();
    }
    else if (meta_state == MSI_INVALID)
    {
+      // Action from l.-1 c. -1
+      action_clear_interference_by(CMD_CCTRL_STORE);
       // Action from l.-1 c. -1
       action_propagate_use_count();
       // Action from l.-1 c. -1
       action_mark_as_cache_miss();
       // Action from l.-1 c. -1
       action_acted();
-      // Action from l.-1 c. -1
-      action_clear_interference_by(CMD_CCTRL_STORE);
-      // Action from l.42 c. 10
+      // Action from l.48 c. 10
       action_send_query(CMD_CCTRL_GET_MODIFIED);
-      // Action from l.43 c. 10
+      // Action from l.49 c. 10
       action_set_state(MSI_IM_BD);
+   }
+   else if (meta_state == MSI_IE_B)
+   {
+      // Action from l.571 c. 24
+      action_stall();
    }
    else if (meta_state == MSI_SM_D_S)
    {
-      // Action from l.360 c. 24
+      // Action from l.425 c. 24
       action_stall();
    }
    else if (meta_state == MSI_SM_BD)
    {
-      // Action from l.275 c. 24
+      // Action from l.336 c. 24
       action_stall();
    }
-   else if (meta_state == MSI_IS_BD)
+   else if (meta_state == MSI_EXCLUSIVE)
    {
-      // Action from l.60 c. 24
-      action_stall();
+      // Action from l.-1 c. -1
+      action_clear_interference_by(CMD_CCTRL_STORE);
+      // Action from l.-1 c. -1
+      action_propagate_use_count();
+      // Action from l.542 c. 10
+      action_succeed();
+      // Action from l.543 c. 10
+      action_set_state(MSI_MODIFIED);
    }
    else if (meta_state == MSI_SM_D_I)
    {
-      // Action from l.341 c. 24
+      // Action from l.405 c. 24
       action_stall();
    }
    else if (meta_state == MSI_IM_D_S)
    {
-      // Action from l.209 c. 24
+      // Action from l.267 c. 24
       action_stall();
    }
 }
 void handle_stalled_CMD_CCTRL_EVICT ()
 {
-   if (meta_state == MSI_IM_BD)
+   if (meta_state == MSI_IM_D_SI)
    {
-      // Action from l.129 c. 24
-      action_stall();
-   }
-   else if (meta_state == MSI_IM_D_SI)
-   {
-      // Action from l.233 c. 24
+      // Action from l.292 c. 24
       action_stall();
    }
    else if (meta_state == MSI_MODIFIED)
    {
+      // Action from l.-1 c. -1
+      action_clear_interference_by(CMD_CCTRL_EVICT);
       // Action from l.-1 c. -1
       action_propagate_use_count();
       // Action from l.-1 c. -1
       action_mark_as_cache_miss();
       // Action from l.-1 c. -1
       action_acted();
-      // Action from l.-1 c. -1
-      action_clear_interference_by(CMD_CCTRL_EVICT);
-      // Action from l.405 c. 10
+      // Action from l.472 c. 10
       action_send_query(CMD_CCTRL_PUT_MODIFIED);
-      // Action from l.406 c. 10
+      // Action from l.473 c. 10
       action_set_state(MSI_MI_B);
-   }
-   else if (meta_state == MSI_SHARED)
-   {
-      // Action from l.-1 c. -1
-      action_propagate_use_count();
-      // Action from l.-1 c. -1
-      action_clear_interference_by(CMD_CCTRL_EVICT);
-      // Action from l.257 c. 10
-      action_set_state(MSI_INVALID);
-      // Action from l.258 c. 10
-      action_succeed();
    }
    else if (meta_state == MSI_IS_D)
    {
-      // Action from l.92 c. 24
+      // Action from l.99 c. 24
       action_stall();
    }
    else if (meta_state == MSI_IS_B)
    {
-      // Action from l.75 c. 24
-      action_stall();
-   }
-   else if (meta_state == MSI_SM_D)
-   {
-      // Action from l.317 c. 24
+      // Action from l.81 c. 24
       action_stall();
    }
    else if (meta_state == MSI_SM_D_SI)
    {
-      // Action from l.384 c. 24
-      action_stall();
-   }
-   else if (meta_state == MSI_IM_D_I)
-   {
-      // Action from l.190 c. 24
-      action_stall();
-   }
-   else if (meta_state == MSI_IS_D_I)
-   {
-      // Action from l.112 c. 24
-      action_stall();
-   }
-   else if (meta_state == MSI_SM_B)
-   {
-      // Action from l.297 c. 24
+      // Action from l.450 c. 24
       action_stall();
    }
    else if (meta_state == MSI_IM_D)
    {
-      // Action from l.164 c. 24
-      action_stall();
-   }
-   else if (meta_state == MSI_MI_B)
-   {
-      // Action from l.430 c. 24
+      // Action from l.220 c. 24
       action_stall();
    }
    else if (meta_state == MSI_IM_B)
    {
-      // Action from l.147 c. 24
+      // Action from l.202 c. 24
+      action_stall();
+   }
+   else if (meta_state == MSI_EI_B)
+   {
+      // Action from l.590 c. 24
+      action_stall();
+   }
+   else if (meta_state == MSI_IEOS_D)
+   {
+      // Action from l.128 c. 24
+      action_stall();
+   }
+   else if (meta_state == MSI_IS_BD)
+   {
+      // Action from l.66 c. 24
+      action_stall();
+   }
+   else if (meta_state == MSI_IM_BD)
+   {
+      // Action from l.183 c. 24
+      action_stall();
+   }
+   else if (meta_state == MSI_SHARED)
+   {
+      // Action from l.-1 c. -1
+      action_clear_interference_by(CMD_CCTRL_EVICT);
+      // Action from l.-1 c. -1
+      action_propagate_use_count();
+      // Action from l.317 c. 10
+      action_set_state(MSI_INVALID);
+      // Action from l.318 c. 10
+      action_succeed();
+   }
+   else if (meta_state == MSI_SM_D)
+   {
+      // Action from l.380 c. 24
+      action_stall();
+   }
+   else if (meta_state == MSI_IM_D_I)
+   {
+      // Action from l.247 c. 24
+      action_stall();
+   }
+   else if (meta_state == MSI_IS_D_I)
+   {
+      // Action from l.158 c. 24
+      action_stall();
+   }
+   else if (meta_state == MSI_SM_B)
+   {
+      // Action from l.359 c. 24
+      action_stall();
+   }
+   else if (meta_state == MSI_MI_B)
+   {
+      // Action from l.498 c. 24
       action_stall();
    }
    else if (meta_state == MSI_II_B)
    {
-      // Action from l.456 c. 24
+      // Action from l.525 c. 24
       action_stall();
    }
    else if (meta_state == MSI_INVALID)
    {
       // Action from l.-1 c. -1
-      action_propagate_use_count();
-      // Action from l.-1 c. -1
       action_clear_interference_by(CMD_CCTRL_EVICT);
-      // Action from l.46 c. 10
+      // Action from l.-1 c. -1
+      action_propagate_use_count();
+      // Action from l.51 c. 24
       action_succeed();
+   }
+   else if (meta_state == MSI_IE_B)
+   {
+      // Action from l.572 c. 24
+      action_stall();
    }
    else if (meta_state == MSI_SM_D_S)
    {
-      // Action from l.361 c. 24
+      // Action from l.426 c. 24
       action_stall();
    }
    else if (meta_state == MSI_SM_BD)
    {
-      // Action from l.276 c. 24
+      // Action from l.337 c. 24
       action_stall();
    }
-   else if (meta_state == MSI_IS_BD)
+   else if (meta_state == MSI_EXCLUSIVE)
    {
-      // Action from l.61 c. 24
-      action_stall();
+      // Action from l.-1 c. -1
+      action_clear_interference_by(CMD_CCTRL_EVICT);
+      // Action from l.-1 c. -1
+      action_propagate_use_count();
+      // Action from l.-1 c. -1
+      action_mark_as_cache_miss();
+      // Action from l.-1 c. -1
+      action_acted();
+      // Action from l.546 c. 10
+      action_send_query(CMD_CCTRL_PUT_MODIFIED);
+      // Action from l.547 c. 10
+      action_set_state(MSI_EI_B);
    }
    else if (meta_state == MSI_SM_D_I)
    {
-      // Action from l.342 c. 24
+      // Action from l.406 c. 24
       action_stall();
    }
    else if (meta_state == MSI_IM_D_S)
    {
-      // Action from l.210 c. 24
+      // Action from l.268 c. 24
       action_stall();
    }
 }
@@ -2690,14 +2905,16 @@ bool unstalls_CMD_CCTRL_LOAD ()
       (
          FALSE
          || relevant_line_is(MSI_MODIFIED)
+         || relevant_line_is(MSI_SM_D_SI)
+         || relevant_line_is(MSI_EI_B)
          || relevant_line_is(MSI_SHARED)
          || relevant_line_is(MSI_SM_D)
-         || relevant_line_is(MSI_SM_D_SI)
          || relevant_line_is(MSI_SM_B)
          || relevant_line_is(MSI_MI_B)
          || relevant_line_is(MSI_INVALID)
          || relevant_line_is(MSI_SM_D_S)
          || relevant_line_is(MSI_SM_BD)
+         || relevant_line_is(MSI_EXCLUSIVE)
          || relevant_line_is(MSI_SM_D_I)
       );
 }
@@ -2710,6 +2927,7 @@ bool unstalls_CMD_CCTRL_STORE ()
          || relevant_line_is(MSI_SHARED)
          || relevant_line_is(MSI_MI_B)
          || relevant_line_is(MSI_INVALID)
+         || relevant_line_is(MSI_EXCLUSIVE)
       );
 }
 bool unstalls_CMD_CCTRL_EVICT ()
@@ -2720,6 +2938,7 @@ bool unstalls_CMD_CCTRL_EVICT ()
          || relevant_line_is(MSI_MODIFIED)
          || relevant_line_is(MSI_SHARED)
          || relevant_line_is(MSI_INVALID)
+         || relevant_line_is(MSI_EXCLUSIVE)
       );
 }/*[/CC_TEST_UNSTALLS_REQUEST]*/
 
@@ -2988,53 +3207,67 @@ void action_complete (const cmd_id_t request)
 /*[CC_HANDLE_BUS_ACCESS]*/
 void handle_bus_access ()
 {
-   if (meta_state == MSI_IM_BD)
+   if (meta_state == MSI_IS_B)
    {
-      // Action from l.132 c. 10
-      action_set_state(MSI_IM_D);
-   }
-   else if (meta_state == MSI_IS_B)
-   {
-      // Action from l.78 c. 10
+      // Action from l.84 c. 10
       action_complete(CMD_CCTRL_LOAD);
-      // Action from l.79 c. 10
+      // Action from l.85 c. 10
       action_set_state(MSI_SHARED);
+   }
+   else if (meta_state == MSI_IM_B)
+   {
+      // Action from l.205 c. 10
+      action_complete(CMD_CCTRL_STORE);
+      // Action from l.206 c. 10
+      action_set_state(MSI_MODIFIED);
+   }
+   else if (meta_state == MSI_EI_B)
+   {
+      // Action from l.593 c. 10
+      action_send_data_to_memory(CMD_DATA_EXCLUSIVE_MSG);
+      // Action from l.594 c. 10
+      action_set_state(MSI_INVALID);
+   }
+   else if (meta_state == MSI_IS_BD)
+   {
+      // Action from l.68 c. 19
+      action_set_state(MSI_IEOS_D);
+   }
+   else if (meta_state == MSI_IM_BD)
+   {
+      // Action from l.186 c. 10
+      action_set_state(MSI_IM_D);
    }
    else if (meta_state == MSI_SM_B)
    {
-      // Action from l.300 c. 10
+      // Action from l.362 c. 10
       action_complete(CMD_CCTRL_STORE);
-      // Action from l.301 c. 10
+      // Action from l.363 c. 10
       action_set_state(MSI_MODIFIED);
    }
    else if (meta_state == MSI_MI_B)
    {
-      // Action from l.433 c. 10
+      // Action from l.501 c. 10
       action_send_data_to_memory(CMD_DATA_MSG);
-      // Action from l.434 c. 10
+      // Action from l.502 c. 10
       action_set_state(MSI_INVALID);
-   }
-   else if (meta_state == MSI_IM_B)
-   {
-      // Action from l.150 c. 10
-      action_complete(CMD_CCTRL_STORE);
-      // Action from l.151 c. 10
-      action_set_state(MSI_MODIFIED);
    }
    else if (meta_state == MSI_II_B)
    {
-      // Action from l.459 c. 10
+      // Action from l.528 c. 10
       action_set_state(MSI_INVALID);
+   }
+   else if (meta_state == MSI_IE_B)
+   {
+      // Action from l.575 c. 10
+      action_complete(CMD_CCTRL_LOAD);
+      // Action from l.576 c. 10
+      action_set_state(MSI_EXCLUSIVE);
    }
    else if (meta_state == MSI_SM_BD)
    {
-      // Action from l.279 c. 10
+      // Action from l.340 c. 10
       action_set_state(MSI_SM_D);
-   }
-   else if (meta_state == MSI_IS_BD)
-   {
-      // Action from l.63 c. 19
-      action_set_state(MSI_IS_D);
    }
 }
 /*[/CC_HANDLE_BUS_ACCESS]*/
@@ -3042,293 +3275,366 @@ void handle_bus_access ()
 /*[CC_HANDLE_QUERY]*/
 void handle_CMD_CCTRL_GET_SHARED ()
 {
-   if (meta_state == MSI_IM_BD)
+   if (meta_state == MSI_IM_D_SI)
    {
-      // Action from l.139 c. 29
-      action_mark_interference(INTERFERENCE_MINOR);
-   }
-   else if (meta_state == MSI_IM_D_SI)
-   {
-      // Action from l.245 c. 29
+      // Action from l.305 c. 29
       action_mark_interference(INTERFERENCE_MINOR);
    }
    else if (meta_state == MSI_MODIFIED)
    {
-      // Action from l.414 c. 10
+      // Action from l.482 c. 10
       action_send_data_to_memory(CMD_DATA_MSG);
-      // Action from l.415 c. 10
+      // Action from l.483 c. 10
       action_send_data_to_sender(CMD_DATA_MSG);
-      // Action from l.416 c. 10
+      // Action from l.484 c. 10
       action_set_state(MSI_SHARED);
-      // Action from l.417 c. 10
+      // Action from l.485 c. 10
       action_mark_interference(INTERFERENCE_DEMOTING);
-   }
-   else if (meta_state == MSI_SHARED)
-   {
-      // Action from l.265 c. 29
-      action_mark_interference(INTERFERENCE_MINOR);
    }
    else if (meta_state == MSI_IS_D)
    {
-      // Action from l.101 c. 29
+      // Action from l.117 c. 29
       action_mark_interference(INTERFERENCE_MINOR);
    }
    else if (meta_state == MSI_IS_B)
    {
-      // Action from l.84 c. 29
+      // Action from l.91 c. 29
       action_mark_interference(INTERFERENCE_MINOR);
-   }
-   else if (meta_state == MSI_SM_D)
-   {
-      // Action from l.327 c. 10
-      action_store_reply_to();
-      // Action from l.328 c. 10
-      action_set_state(MSI_SM_D_S);
-      // Action from l.329 c. 10
-      action_mark_interference(INTERFERENCE_DEMOTING);
    }
    else if (meta_state == MSI_SM_D_SI)
    {
-      // Action from l.396 c. 29
-      action_mark_interference(INTERFERENCE_MINOR);
-   }
-   else if (meta_state == MSI_IM_D_I)
-   {
-      // Action from l.201 c. 29
-      action_mark_interference(INTERFERENCE_MINOR);
-   }
-   else if (meta_state == MSI_IS_D_I)
-   {
-      // Action from l.121 c. 29
-      action_mark_interference(INTERFERENCE_MINOR);
-   }
-   else if (meta_state == MSI_SM_B)
-   {
-      // Action from l.306 c. 29
+      // Action from l.463 c. 29
       action_mark_interference(INTERFERENCE_MINOR);
    }
    else if (meta_state == MSI_IM_D)
    {
-      // Action from l.174 c. 10
+      // Action from l.231 c. 10
       action_store_reply_to();
-      // Action from l.175 c. 10
+      // Action from l.232 c. 10
       action_set_state(MSI_IM_D_S);
-      // Action from l.176 c. 10
+      // Action from l.233 c. 10
       action_mark_interference(INTERFERENCE_DEMOTING);
-   }
-   else if (meta_state == MSI_MI_B)
-   {
-      // Action from l.440 c. 10
-      action_send_data_to_memory(CMD_DATA_MSG);
-      // Action from l.441 c. 10
-      action_send_data_to_sender(CMD_DATA_MSG);
-      // Action from l.442 c. 10
-      action_set_state(MSI_II_B);
-      // Action from l.443 c. 10
-      action_mark_interference(INTERFERENCE_EXPELLING);
    }
    else if (meta_state == MSI_IM_B)
    {
-      // Action from l.156 c. 29
+      // Action from l.212 c. 29
       action_mark_interference(INTERFERENCE_MINOR);
+   }
+   else if (meta_state == MSI_EI_B)
+   {
+      // Action from l.601 c. 10
+      action_send_data_to_memory(CMD_DATA_EXCLUSIVE_MSG);
+      // Action from l.602 c. 10
+      action_send_data_to_sender(CMD_DATA_MSG);
+      // Action from l.603 c. 10
+      action_set_state(MSI_II_B);
+      // Action from l.604 c. 10
+      action_mark_interference(INTERFERENCE_EXPELLING);
+   }
+   else if (meta_state == MSI_IEOS_D)
+   {
+      // Action from l.143 c. 10
+      action_mark_interference(INTERFERENCE_MINOR);
+      // Action from l.144 c. 10
+      action_store_reply_to();
+      // Action from l.145 c. 10
+      action_set_state(MSI_IS_D);
+   }
+   else if (meta_state == MSI_IS_BD)
+   {
+      // Action from l.73 c. 29
+      action_mark_interference(INTERFERENCE_MINOR);
+   }
+   else if (meta_state == MSI_IM_BD)
+   {
+      // Action from l.194 c. 29
+      action_mark_interference(INTERFERENCE_MINOR);
+   }
+   else if (meta_state == MSI_SHARED)
+   {
+      // Action from l.326 c. 29
+      action_mark_interference(INTERFERENCE_MINOR);
+   }
+   else if (meta_state == MSI_SM_D)
+   {
+      // Action from l.391 c. 10
+      action_store_reply_to();
+      // Action from l.392 c. 10
+      action_set_state(MSI_SM_D_S);
+      // Action from l.393 c. 10
+      action_mark_interference(INTERFERENCE_DEMOTING);
+   }
+   else if (meta_state == MSI_IM_D_I)
+   {
+      // Action from l.259 c. 29
+      action_mark_interference(INTERFERENCE_MINOR);
+   }
+   else if (meta_state == MSI_IS_D_I)
+   {
+      // Action from l.175 c. 29
+      action_mark_interference(INTERFERENCE_MINOR);
+   }
+   else if (meta_state == MSI_SM_B)
+   {
+      // Action from l.369 c. 29
+      action_mark_interference(INTERFERENCE_MINOR);
+   }
+   else if (meta_state == MSI_MI_B)
+   {
+      // Action from l.509 c. 10
+      action_send_data_to_memory(CMD_DATA_MSG);
+      // Action from l.510 c. 10
+      action_send_data_to_sender(CMD_DATA_MSG);
+      // Action from l.511 c. 10
+      action_set_state(MSI_II_B);
+      // Action from l.512 c. 10
+      action_mark_interference(INTERFERENCE_EXPELLING);
    }
    else if (meta_state == MSI_II_B)
    {
-      // Action from l.464 c. 29
+      // Action from l.534 c. 29
       action_mark_interference(INTERFERENCE_MINOR);
    }
    else if (meta_state == MSI_INVALID)
    {
-      // Action from l.53 c. 29
+      // Action from l.58 c. 29
+      action_mark_interference(INTERFERENCE_MINOR);
+   }
+   else if (meta_state == MSI_IE_B)
+   {
+      // Action from l.582 c. 29
       action_mark_interference(INTERFERENCE_MINOR);
    }
    else if (meta_state == MSI_SM_D_S)
    {
-      // Action from l.373 c. 29
+      // Action from l.439 c. 29
       action_mark_interference(INTERFERENCE_MINOR);
    }
    else if (meta_state == MSI_SM_BD)
    {
-      // Action from l.286 c. 29
+      // Action from l.348 c. 29
       action_mark_interference(INTERFERENCE_MINOR);
    }
-   else if (meta_state == MSI_IS_BD)
+   else if (meta_state == MSI_EXCLUSIVE)
    {
-      // Action from l.67 c. 29
-      action_mark_interference(INTERFERENCE_MINOR);
+      // Action from l.556 c. 10
+      action_send_data_to_memory(CMD_DATA_EXCLUSIVE_MSG);
+      // Action from l.557 c. 10
+      action_send_data_to_sender(CMD_DATA_MSG);
+      // Action from l.558 c. 10
+      action_set_state(MSI_SHARED);
+      // Action from l.559 c. 10
+      action_mark_interference(INTERFERENCE_DEMOTING);
    }
    else if (meta_state == MSI_SM_D_I)
    {
-      // Action from l.353 c. 29
+      // Action from l.418 c. 29
       action_mark_interference(INTERFERENCE_MINOR);
    }
    else if (meta_state == MSI_IM_D_S)
    {
-      // Action from l.222 c. 29
+      // Action from l.281 c. 29
       action_mark_interference(INTERFERENCE_MINOR);
    }
 }
 void handle_CMD_CCTRL_GET_MODIFIED ()
 {
-   if (meta_state == MSI_IM_BD)
+   if (meta_state == MSI_IM_D_SI)
    {
-      // Action from l.140 c. 31
-      action_mark_interference(INTERFERENCE_MINOR);
-   }
-   else if (meta_state == MSI_IM_D_SI)
-   {
-      // Action from l.246 c. 31
+      // Action from l.306 c. 31
       action_mark_interference(INTERFERENCE_MINOR);
    }
    else if (meta_state == MSI_MODIFIED)
    {
-      // Action from l.420 c. 10
+      // Action from l.488 c. 10
       action_send_data_to_sender(CMD_DATA_MSG);
-      // Action from l.421 c. 10
+      // Action from l.489 c. 10
       action_set_state(MSI_INVALID);
-      // Action from l.422 c. 10
-      action_mark_interference(INTERFERENCE_EXPELLING);
-   }
-   else if (meta_state == MSI_SHARED)
-   {
-      // Action from l.267 c. 10
-      action_set_state(MSI_INVALID);
-      // Action from l.268 c. 10
+      // Action from l.490 c. 10
       action_mark_interference(INTERFERENCE_EXPELLING);
    }
    else if (meta_state == MSI_IS_D)
    {
-      // Action from l.103 c. 10
+      // Action from l.119 c. 10
       action_set_state(MSI_IS_D_I);
-      // Action from l.104 c. 10
+      // Action from l.120 c. 10
       action_mark_interference(INTERFERENCE_EXPELLING);
    }
    else if (meta_state == MSI_IS_B)
    {
-      // Action from l.85 c. 31
+      // Action from l.92 c. 31
       action_mark_interference(INTERFERENCE_MINOR);
-   }
-   else if (meta_state == MSI_SM_D)
-   {
-      // Action from l.332 c. 10
-      action_store_reply_to();
-      // Action from l.333 c. 10
-      action_set_state(MSI_SM_D_I);
-      // Action from l.334 c. 10
-      action_mark_interference(INTERFERENCE_EXPELLING);
    }
    else if (meta_state == MSI_SM_D_SI)
    {
-      // Action from l.397 c. 31
-      action_mark_interference(INTERFERENCE_MINOR);
-   }
-   else if (meta_state == MSI_IM_D_I)
-   {
-      // Action from l.203 c. 31
-      action_mark_interference(INTERFERENCE_MINOR);
-   }
-   else if (meta_state == MSI_IS_D_I)
-   {
-      // Action from l.122 c. 31
-      action_mark_interference(INTERFERENCE_MINOR);
-   }
-   else if (meta_state == MSI_SM_B)
-   {
-      // Action from l.308 c. 10
-      action_set_state(MSI_IM_B);
-      // Action from l.309 c. 10
+      // Action from l.464 c. 31
       action_mark_interference(INTERFERENCE_MINOR);
    }
    else if (meta_state == MSI_IM_D)
    {
-      // Action from l.180 c. 10
+      // Action from l.237 c. 10
       action_store_reply_to();
-      // Action from l.181 c. 10
+      // Action from l.238 c. 10
       action_set_state(MSI_IM_D_I);
-      // Action from l.182 c. 10
-      action_mark_interference(INTERFERENCE_EXPELLING);
-   }
-   else if (meta_state == MSI_MI_B)
-   {
-      // Action from l.446 c. 10
-      action_send_data_to_sender(CMD_DATA_MSG);
-      // Action from l.447 c. 10
-      action_set_state(MSI_II_B);
-      // Action from l.448 c. 10
+      // Action from l.239 c. 10
       action_mark_interference(INTERFERENCE_EXPELLING);
    }
    else if (meta_state == MSI_IM_B)
    {
-      // Action from l.157 c. 31
+      // Action from l.213 c. 31
       action_mark_interference(INTERFERENCE_MINOR);
    }
-   else if (meta_state == MSI_II_B)
+   else if (meta_state == MSI_EI_B)
    {
-      // Action from l.465 c. 31
-      action_mark_interference(INTERFERENCE_MINOR);
-   }
-   else if (meta_state == MSI_INVALID)
-   {
-      // Action from l.54 c. 31
-      action_mark_interference(INTERFERENCE_MINOR);
-   }
-   else if (meta_state == MSI_SM_D_S)
-   {
-      // Action from l.375 c. 10
-      action_set_state(MSI_SM_D_SI);
-      // Action from l.376 c. 10
+      // Action from l.607 c. 10
+      action_send_data_to_sender(CMD_DATA_MSG);
+      // Action from l.608 c. 10
+      action_set_state(MSI_II_B);
+      // Action from l.609 c. 10
       action_mark_interference(INTERFERENCE_EXPELLING);
    }
-   else if (meta_state == MSI_SM_BD)
+   else if (meta_state == MSI_IEOS_D)
    {
-      // Action from l.288 c. 10
-      action_set_state(MSI_IM_BD);
-      // Action from l.289 c. 10
+      // Action from l.148 c. 10
+      action_set_state(MSI_IS_D_I);
+      // Action from l.149 c. 10
+      action_store_reply_to();
+      // Action from l.150 c. 10
       action_mark_interference(INTERFERENCE_EXPELLING);
    }
    else if (meta_state == MSI_IS_BD)
    {
-      // Action from l.68 c. 31
+      // Action from l.74 c. 31
       action_mark_interference(INTERFERENCE_MINOR);
+   }
+   else if (meta_state == MSI_IM_BD)
+   {
+      // Action from l.195 c. 31
+      action_mark_interference(INTERFERENCE_MINOR);
+   }
+   else if (meta_state == MSI_SHARED)
+   {
+      // Action from l.328 c. 10
+      action_set_state(MSI_INVALID);
+      // Action from l.329 c. 10
+      action_mark_interference(INTERFERENCE_EXPELLING);
+   }
+   else if (meta_state == MSI_SM_D)
+   {
+      // Action from l.396 c. 10
+      action_store_reply_to();
+      // Action from l.397 c. 10
+      action_set_state(MSI_SM_D_I);
+      // Action from l.398 c. 10
+      action_mark_interference(INTERFERENCE_EXPELLING);
+   }
+   else if (meta_state == MSI_IM_D_I)
+   {
+      // Action from l.261 c. 31
+      action_mark_interference(INTERFERENCE_MINOR);
+   }
+   else if (meta_state == MSI_IS_D_I)
+   {
+      // Action from l.176 c. 31
+      action_mark_interference(INTERFERENCE_MINOR);
+   }
+   else if (meta_state == MSI_SM_B)
+   {
+      // Action from l.371 c. 10
+      action_set_state(MSI_IM_B);
+      // Action from l.372 c. 10
+      action_mark_interference(INTERFERENCE_EXPELLING);
+   }
+   else if (meta_state == MSI_MI_B)
+   {
+      // Action from l.515 c. 10
+      action_send_data_to_sender(CMD_DATA_MSG);
+      // Action from l.516 c. 10
+      action_set_state(MSI_II_B);
+      // Action from l.517 c. 10
+      action_mark_interference(INTERFERENCE_EXPELLING);
+   }
+   else if (meta_state == MSI_II_B)
+   {
+      // Action from l.535 c. 31
+      action_mark_interference(INTERFERENCE_MINOR);
+   }
+   else if (meta_state == MSI_INVALID)
+   {
+      // Action from l.59 c. 31
+      action_mark_interference(INTERFERENCE_MINOR);
+   }
+   else if (meta_state == MSI_IE_B)
+   {
+      // Action from l.583 c. 31
+      action_mark_interference(INTERFERENCE_MINOR);
+   }
+   else if (meta_state == MSI_SM_D_S)
+   {
+      // Action from l.441 c. 10
+      action_set_state(MSI_SM_D_SI);
+      // Action from l.442 c. 10
+      action_mark_interference(INTERFERENCE_EXPELLING);
+   }
+   else if (meta_state == MSI_SM_BD)
+   {
+      // Action from l.350 c. 10
+      action_set_state(MSI_IM_BD);
+      // Action from l.351 c. 10
+      action_mark_interference(INTERFERENCE_EXPELLING);
+   }
+   else if (meta_state == MSI_EXCLUSIVE)
+   {
+      // Action from l.562 c. 10
+      action_send_data_to_sender(CMD_DATA_MSG);
+      // Action from l.563 c. 10
+      action_set_state(MSI_INVALID);
+      // Action from l.564 c. 10
+      action_mark_interference(INTERFERENCE_EXPELLING);
    }
    else if (meta_state == MSI_SM_D_I)
    {
-      // Action from l.354 c. 31
+      // Action from l.419 c. 31
       action_mark_interference(INTERFERENCE_MINOR);
    }
    else if (meta_state == MSI_IM_D_S)
    {
-      // Action from l.224 c. 10
+      // Action from l.283 c. 10
       action_set_state(MSI_IM_D_SI);
-      // Action from l.225 c. 10
+      // Action from l.284 c. 10
       action_mark_interference(INTERFERENCE_EXPELLING);
    }
 }
 void handle_CMD_CCTRL_PUT_MODIFIED ()
 {
-   if (meta_state == MSI_IM_BD)
+   if (meta_state == MSI_IM_B)
    {
-      // Action from l.141 c. 31
-      action_mark_interference(INTERFERENCE_MINOR);
-   }
-   else if (meta_state == MSI_IM_B)
-   {
-      // Action from l.158 c. 31
-      action_mark_interference(INTERFERENCE_MINOR);
-   }
-   else if (meta_state == MSI_II_B)
-   {
-      // Action from l.466 c. 31
-      action_mark_interference(INTERFERENCE_MINOR);
-   }
-   else if (meta_state == MSI_INVALID)
-   {
-      // Action from l.55 c. 31
+      // Action from l.214 c. 31
       action_mark_interference(INTERFERENCE_MINOR);
    }
    else if (meta_state == MSI_IS_BD)
    {
-      // Action from l.69 c. 31
+      // Action from l.75 c. 31
+      action_mark_interference(INTERFERENCE_MINOR);
+   }
+   else if (meta_state == MSI_IM_BD)
+   {
+      // Action from l.196 c. 31
+      action_mark_interference(INTERFERENCE_MINOR);
+   }
+   else if (meta_state == MSI_II_B)
+   {
+      // Action from l.536 c. 31
+      action_mark_interference(INTERFERENCE_MINOR);
+   }
+   else if (meta_state == MSI_INVALID)
+   {
+      // Action from l.60 c. 31
+      action_mark_interference(INTERFERENCE_MINOR);
+   }
+   else if (meta_state == MSI_IE_B)
+   {
+      // Action from l.584 c. 31
       action_mark_interference(INTERFERENCE_MINOR);
    }
 }
@@ -3340,10 +3646,6 @@ void parse_bus_message ()
 
    msg_in = transient_msg;
 
-   cache_local_address_infos
-   [
-      msg_in.addr_t_params[0]
-   ].potential_interference_count[INTERFERENCE_MINOR] += 1;
 
    current_line = get_line_of(msg_in.addr_t_params[0], cache_lines);
 
@@ -3361,7 +3663,13 @@ void parse_bus_message ()
    }
    else
    {
-      /*[CC_HANDLE_QUERY_SWITCH]*/
+
+     cache_local_address_infos
+     [
+        msg_in.addr_t_params[0]
+     ].potential_interference_count[INTERFERENCE_MINOR] += 1;
+
+   /*[CC_HANDLE_QUERY_SWITCH]*/
    if (req_in == CMD_CCTRL_GET_SHARED)
    {
       handle_CMD_CCTRL_GET_SHARED();
@@ -3381,419 +3689,503 @@ void parse_bus_message ()
 /*[CC_HANDLE_REQUEST]*/
 void handle_CMD_CCTRL_LOAD ()
 {
-   if (meta_state == MSI_IM_BD)
+   if (meta_state == MSI_IM_D_SI)
    {
-      // Action from l.127 c. 23
-      action_stall();
-   }
-   else if (meta_state == MSI_IM_D_SI)
-   {
-      // Action from l.231 c. 23
+      // Action from l.290 c. 23
       action_stall();
    }
    else if (meta_state == MSI_MODIFIED)
    {
       // Action from l.-1 c. -1
-      action_propagate_use_count();
-      // Action from l.-1 c. -1
       action_clear_interference_by(CMD_CCTRL_LOAD);
-      // Action from l.402 c. 23
-      action_succeed();
-   }
-   else if (meta_state == MSI_SHARED)
-   {
       // Action from l.-1 c. -1
       action_propagate_use_count();
-      // Action from l.-1 c. -1
-      action_clear_interference_by(CMD_CCTRL_LOAD);
-      // Action from l.251 c. 23
+      // Action from l.469 c. 23
       action_succeed();
    }
    else if (meta_state == MSI_IS_D)
    {
-      // Action from l.90 c. 23
+      // Action from l.97 c. 23
       action_stall();
    }
    else if (meta_state == MSI_IS_B)
    {
-      // Action from l.73 c. 23
+      // Action from l.79 c. 23
       action_stall();
-   }
-   else if (meta_state == MSI_SM_D)
-   {
-      // Action from l.-1 c. -1
-      action_propagate_use_count();
-      // Action from l.-1 c. -1
-      action_clear_interference_by(CMD_CCTRL_LOAD);
-      // Action from l.315 c. 23
-      action_succeed();
    }
    else if (meta_state == MSI_SM_D_SI)
    {
       // Action from l.-1 c. -1
+      action_clear_interference_by(CMD_CCTRL_LOAD);
+      // Action from l.-1 c. -1
       action_propagate_use_count();
+      // Action from l.448 c. 23
+      action_succeed();
+   }
+   else if (meta_state == MSI_IM_D)
+   {
+      // Action from l.218 c. 23
+      action_stall();
+   }
+   else if (meta_state == MSI_IM_B)
+   {
+      // Action from l.200 c. 23
+      action_stall();
+   }
+   else if (meta_state == MSI_EI_B)
+   {
       // Action from l.-1 c. -1
       action_clear_interference_by(CMD_CCTRL_LOAD);
-      // Action from l.382 c. 23
+      // Action from l.-1 c. -1
+      action_propagate_use_count();
+      // Action from l.588 c. 23
+      action_succeed();
+   }
+   else if (meta_state == MSI_IEOS_D)
+   {
+      // Action from l.126 c. 23
+      action_stall();
+   }
+   else if (meta_state == MSI_IS_BD)
+   {
+      // Action from l.64 c. 23
+      action_stall();
+   }
+   else if (meta_state == MSI_IM_BD)
+   {
+      // Action from l.181 c. 23
+      action_stall();
+   }
+   else if (meta_state == MSI_SHARED)
+   {
+      // Action from l.-1 c. -1
+      action_clear_interference_by(CMD_CCTRL_LOAD);
+      // Action from l.-1 c. -1
+      action_propagate_use_count();
+      // Action from l.311 c. 23
+      action_succeed();
+   }
+   else if (meta_state == MSI_SM_D)
+   {
+      // Action from l.-1 c. -1
+      action_clear_interference_by(CMD_CCTRL_LOAD);
+      // Action from l.-1 c. -1
+      action_propagate_use_count();
+      // Action from l.378 c. 23
       action_succeed();
    }
    else if (meta_state == MSI_IM_D_I)
    {
-      // Action from l.188 c. 23
+      // Action from l.245 c. 23
       action_stall();
    }
    else if (meta_state == MSI_IS_D_I)
    {
-      // Action from l.110 c. 23
+      // Action from l.156 c. 23
       action_stall();
    }
    else if (meta_state == MSI_SM_B)
    {
       // Action from l.-1 c. -1
-      action_propagate_use_count();
-      // Action from l.-1 c. -1
       action_clear_interference_by(CMD_CCTRL_LOAD);
-      // Action from l.295 c. 23
+      // Action from l.-1 c. -1
+      action_propagate_use_count();
+      // Action from l.357 c. 23
       action_succeed();
-   }
-   else if (meta_state == MSI_IM_D)
-   {
-      // Action from l.162 c. 23
-      action_stall();
    }
    else if (meta_state == MSI_MI_B)
    {
       // Action from l.-1 c. -1
-      action_propagate_use_count();
-      // Action from l.-1 c. -1
       action_clear_interference_by(CMD_CCTRL_LOAD);
-      // Action from l.428 c. 23
+      // Action from l.-1 c. -1
+      action_propagate_use_count();
+      // Action from l.496 c. 23
       action_succeed();
-   }
-   else if (meta_state == MSI_IM_B)
-   {
-      // Action from l.145 c. 23
-      action_stall();
    }
    else if (meta_state == MSI_II_B)
    {
-      // Action from l.454 c. 23
+      // Action from l.523 c. 23
       action_stall();
    }
    else if (meta_state == MSI_INVALID)
    {
+      // Action from l.-1 c. -1
+      action_clear_interference_by(CMD_CCTRL_LOAD);
       // Action from l.-1 c. -1
       action_propagate_use_count();
       // Action from l.-1 c. -1
       action_mark_as_cache_miss();
       // Action from l.-1 c. -1
       action_acted();
-      // Action from l.-1 c. -1
-      action_clear_interference_by(CMD_CCTRL_LOAD);
-      // Action from l.38 c. 10
+      // Action from l.44 c. 10
       action_send_query(CMD_CCTRL_GET_SHARED);
-      // Action from l.39 c. 10
+      // Action from l.45 c. 10
       action_set_state(MSI_IS_BD);
+   }
+   else if (meta_state == MSI_IE_B)
+   {
+      // Action from l.570 c. 23
+      action_stall();
    }
    else if (meta_state == MSI_SM_D_S)
    {
       // Action from l.-1 c. -1
-      action_propagate_use_count();
-      // Action from l.-1 c. -1
       action_clear_interference_by(CMD_CCTRL_LOAD);
-      // Action from l.359 c. 23
+      // Action from l.-1 c. -1
+      action_propagate_use_count();
+      // Action from l.424 c. 23
       action_succeed();
    }
    else if (meta_state == MSI_SM_BD)
    {
       // Action from l.-1 c. -1
-      action_propagate_use_count();
-      // Action from l.-1 c. -1
       action_clear_interference_by(CMD_CCTRL_LOAD);
-      // Action from l.274 c. 23
+      // Action from l.-1 c. -1
+      action_propagate_use_count();
+      // Action from l.335 c. 23
       action_succeed();
    }
-   else if (meta_state == MSI_IS_BD)
+   else if (meta_state == MSI_EXCLUSIVE)
    {
-      // Action from l.59 c. 23
-      action_stall();
+      // Action from l.-1 c. -1
+      action_clear_interference_by(CMD_CCTRL_LOAD);
+      // Action from l.-1 c. -1
+      action_propagate_use_count();
+      // Action from l.540 c. 23
+      action_succeed();
    }
    else if (meta_state == MSI_SM_D_I)
    {
       // Action from l.-1 c. -1
-      action_propagate_use_count();
-      // Action from l.-1 c. -1
       action_clear_interference_by(CMD_CCTRL_LOAD);
-      // Action from l.340 c. 23
+      // Action from l.-1 c. -1
+      action_propagate_use_count();
+      // Action from l.404 c. 23
       action_succeed();
    }
    else if (meta_state == MSI_IM_D_S)
    {
-      // Action from l.208 c. 23
+      // Action from l.266 c. 23
       action_stall();
    }
 }
 void handle_CMD_CCTRL_STORE ()
 {
-   if (meta_state == MSI_IM_BD)
+   if (meta_state == MSI_IM_D_SI)
    {
-      // Action from l.128 c. 24
-      action_stall();
-   }
-   else if (meta_state == MSI_IM_D_SI)
-   {
-      // Action from l.232 c. 24
+      // Action from l.291 c. 24
       action_stall();
    }
    else if (meta_state == MSI_MODIFIED)
    {
       // Action from l.-1 c. -1
-      action_propagate_use_count();
-      // Action from l.-1 c. -1
       action_clear_interference_by(CMD_CCTRL_STORE);
-      // Action from l.403 c. 24
+      // Action from l.-1 c. -1
+      action_propagate_use_count();
+      // Action from l.470 c. 24
       action_succeed();
+   }
+   else if (meta_state == MSI_IS_D)
+   {
+      // Action from l.98 c. 24
+      action_stall();
+   }
+   else if (meta_state == MSI_IS_B)
+   {
+      // Action from l.80 c. 24
+      action_stall();
+   }
+   else if (meta_state == MSI_SM_D_SI)
+   {
+      // Action from l.449 c. 24
+      action_stall();
+   }
+   else if (meta_state == MSI_IM_D)
+   {
+      // Action from l.219 c. 24
+      action_stall();
+   }
+   else if (meta_state == MSI_IM_B)
+   {
+      // Action from l.201 c. 24
+      action_stall();
+   }
+   else if (meta_state == MSI_EI_B)
+   {
+      // Action from l.589 c. 24
+      action_stall();
+   }
+   else if (meta_state == MSI_IEOS_D)
+   {
+      // Action from l.127 c. 24
+      action_stall();
+   }
+   else if (meta_state == MSI_IS_BD)
+   {
+      // Action from l.65 c. 24
+      action_stall();
+   }
+   else if (meta_state == MSI_IM_BD)
+   {
+      // Action from l.182 c. 24
+      action_stall();
    }
    else if (meta_state == MSI_SHARED)
    {
+      // Action from l.-1 c. -1
+      action_clear_interference_by(CMD_CCTRL_STORE);
       // Action from l.-1 c. -1
       action_propagate_use_count();
       // Action from l.-1 c. -1
       action_mark_as_cache_miss();
       // Action from l.-1 c. -1
       action_acted();
-      // Action from l.-1 c. -1
-      action_clear_interference_by(CMD_CCTRL_STORE);
-      // Action from l.253 c. 10
+      // Action from l.313 c. 10
       action_send_query(CMD_CCTRL_GET_MODIFIED);
-      // Action from l.254 c. 10
+      // Action from l.314 c. 10
       action_set_state(MSI_SM_BD);
-   }
-   else if (meta_state == MSI_IS_D)
-   {
-      // Action from l.91 c. 24
-      action_stall();
-   }
-   else if (meta_state == MSI_IS_B)
-   {
-      // Action from l.74 c. 24
-      action_stall();
    }
    else if (meta_state == MSI_SM_D)
    {
-      // Action from l.316 c. 24
-      action_stall();
-   }
-   else if (meta_state == MSI_SM_D_SI)
-   {
-      // Action from l.383 c. 24
+      // Action from l.379 c. 24
       action_stall();
    }
    else if (meta_state == MSI_IM_D_I)
    {
-      // Action from l.189 c. 24
+      // Action from l.246 c. 24
       action_stall();
    }
    else if (meta_state == MSI_IS_D_I)
    {
-      // Action from l.111 c. 24
+      // Action from l.157 c. 24
       action_stall();
    }
    else if (meta_state == MSI_SM_B)
    {
-      // Action from l.296 c. 24
-      action_stall();
-   }
-   else if (meta_state == MSI_IM_D)
-   {
-      // Action from l.163 c. 24
+      // Action from l.358 c. 24
       action_stall();
    }
    else if (meta_state == MSI_MI_B)
    {
       // Action from l.-1 c. -1
-      action_propagate_use_count();
-      // Action from l.-1 c. -1
       action_clear_interference_by(CMD_CCTRL_STORE);
-      // Action from l.429 c. 24
+      // Action from l.-1 c. -1
+      action_propagate_use_count();
+      // Action from l.497 c. 24
       action_succeed();
-   }
-   else if (meta_state == MSI_IM_B)
-   {
-      // Action from l.146 c. 24
-      action_stall();
    }
    else if (meta_state == MSI_II_B)
    {
-      // Action from l.455 c. 24
+      // Action from l.524 c. 24
       action_stall();
    }
    else if (meta_state == MSI_INVALID)
    {
+      // Action from l.-1 c. -1
+      action_clear_interference_by(CMD_CCTRL_STORE);
       // Action from l.-1 c. -1
       action_propagate_use_count();
       // Action from l.-1 c. -1
       action_mark_as_cache_miss();
       // Action from l.-1 c. -1
       action_acted();
-      // Action from l.-1 c. -1
-      action_clear_interference_by(CMD_CCTRL_STORE);
-      // Action from l.42 c. 10
+      // Action from l.48 c. 10
       action_send_query(CMD_CCTRL_GET_MODIFIED);
-      // Action from l.43 c. 10
+      // Action from l.49 c. 10
       action_set_state(MSI_IM_BD);
+   }
+   else if (meta_state == MSI_IE_B)
+   {
+      // Action from l.571 c. 24
+      action_stall();
    }
    else if (meta_state == MSI_SM_D_S)
    {
-      // Action from l.360 c. 24
+      // Action from l.425 c. 24
       action_stall();
    }
    else if (meta_state == MSI_SM_BD)
    {
-      // Action from l.275 c. 24
+      // Action from l.336 c. 24
       action_stall();
    }
-   else if (meta_state == MSI_IS_BD)
+   else if (meta_state == MSI_EXCLUSIVE)
    {
-      // Action from l.60 c. 24
-      action_stall();
+      // Action from l.-1 c. -1
+      action_clear_interference_by(CMD_CCTRL_STORE);
+      // Action from l.-1 c. -1
+      action_propagate_use_count();
+      // Action from l.542 c. 10
+      action_succeed();
+      // Action from l.543 c. 10
+      action_set_state(MSI_MODIFIED);
    }
    else if (meta_state == MSI_SM_D_I)
    {
-      // Action from l.341 c. 24
+      // Action from l.405 c. 24
       action_stall();
    }
    else if (meta_state == MSI_IM_D_S)
    {
-      // Action from l.209 c. 24
+      // Action from l.267 c. 24
       action_stall();
    }
 }
 void handle_CMD_CCTRL_EVICT ()
 {
-   if (meta_state == MSI_IM_BD)
+   if (meta_state == MSI_IM_D_SI)
    {
-      // Action from l.129 c. 24
-      action_stall();
-   }
-   else if (meta_state == MSI_IM_D_SI)
-   {
-      // Action from l.233 c. 24
+      // Action from l.292 c. 24
       action_stall();
    }
    else if (meta_state == MSI_MODIFIED)
    {
+      // Action from l.-1 c. -1
+      action_clear_interference_by(CMD_CCTRL_EVICT);
       // Action from l.-1 c. -1
       action_propagate_use_count();
       // Action from l.-1 c. -1
       action_mark_as_cache_miss();
       // Action from l.-1 c. -1
       action_acted();
-      // Action from l.-1 c. -1
-      action_clear_interference_by(CMD_CCTRL_EVICT);
-      // Action from l.405 c. 10
+      // Action from l.472 c. 10
       action_send_query(CMD_CCTRL_PUT_MODIFIED);
-      // Action from l.406 c. 10
+      // Action from l.473 c. 10
       action_set_state(MSI_MI_B);
-   }
-   else if (meta_state == MSI_SHARED)
-   {
-      // Action from l.-1 c. -1
-      action_propagate_use_count();
-      // Action from l.-1 c. -1
-      action_clear_interference_by(CMD_CCTRL_EVICT);
-      // Action from l.257 c. 10
-      action_set_state(MSI_INVALID);
-      // Action from l.258 c. 10
-      action_succeed();
    }
    else if (meta_state == MSI_IS_D)
    {
-      // Action from l.92 c. 24
+      // Action from l.99 c. 24
       action_stall();
    }
    else if (meta_state == MSI_IS_B)
    {
-      // Action from l.75 c. 24
-      action_stall();
-   }
-   else if (meta_state == MSI_SM_D)
-   {
-      // Action from l.317 c. 24
+      // Action from l.81 c. 24
       action_stall();
    }
    else if (meta_state == MSI_SM_D_SI)
    {
-      // Action from l.384 c. 24
-      action_stall();
-   }
-   else if (meta_state == MSI_IM_D_I)
-   {
-      // Action from l.190 c. 24
-      action_stall();
-   }
-   else if (meta_state == MSI_IS_D_I)
-   {
-      // Action from l.112 c. 24
-      action_stall();
-   }
-   else if (meta_state == MSI_SM_B)
-   {
-      // Action from l.297 c. 24
+      // Action from l.450 c. 24
       action_stall();
    }
    else if (meta_state == MSI_IM_D)
    {
-      // Action from l.164 c. 24
-      action_stall();
-   }
-   else if (meta_state == MSI_MI_B)
-   {
-      // Action from l.430 c. 24
+      // Action from l.220 c. 24
       action_stall();
    }
    else if (meta_state == MSI_IM_B)
    {
-      // Action from l.147 c. 24
+      // Action from l.202 c. 24
+      action_stall();
+   }
+   else if (meta_state == MSI_EI_B)
+   {
+      // Action from l.590 c. 24
+      action_stall();
+   }
+   else if (meta_state == MSI_IEOS_D)
+   {
+      // Action from l.128 c. 24
+      action_stall();
+   }
+   else if (meta_state == MSI_IS_BD)
+   {
+      // Action from l.66 c. 24
+      action_stall();
+   }
+   else if (meta_state == MSI_IM_BD)
+   {
+      // Action from l.183 c. 24
+      action_stall();
+   }
+   else if (meta_state == MSI_SHARED)
+   {
+      // Action from l.-1 c. -1
+      action_clear_interference_by(CMD_CCTRL_EVICT);
+      // Action from l.-1 c. -1
+      action_propagate_use_count();
+      // Action from l.317 c. 10
+      action_set_state(MSI_INVALID);
+      // Action from l.318 c. 10
+      action_succeed();
+   }
+   else if (meta_state == MSI_SM_D)
+   {
+      // Action from l.380 c. 24
+      action_stall();
+   }
+   else if (meta_state == MSI_IM_D_I)
+   {
+      // Action from l.247 c. 24
+      action_stall();
+   }
+   else if (meta_state == MSI_IS_D_I)
+   {
+      // Action from l.158 c. 24
+      action_stall();
+   }
+   else if (meta_state == MSI_SM_B)
+   {
+      // Action from l.359 c. 24
+      action_stall();
+   }
+   else if (meta_state == MSI_MI_B)
+   {
+      // Action from l.498 c. 24
       action_stall();
    }
    else if (meta_state == MSI_II_B)
    {
-      // Action from l.456 c. 24
+      // Action from l.525 c. 24
       action_stall();
    }
    else if (meta_state == MSI_INVALID)
    {
       // Action from l.-1 c. -1
-      action_propagate_use_count();
-      // Action from l.-1 c. -1
       action_clear_interference_by(CMD_CCTRL_EVICT);
-      // Action from l.46 c. 10
+      // Action from l.-1 c. -1
+      action_propagate_use_count();
+      // Action from l.51 c. 24
       action_succeed();
+   }
+   else if (meta_state == MSI_IE_B)
+   {
+      // Action from l.572 c. 24
+      action_stall();
    }
    else if (meta_state == MSI_SM_D_S)
    {
-      // Action from l.361 c. 24
+      // Action from l.426 c. 24
       action_stall();
    }
    else if (meta_state == MSI_SM_BD)
    {
-      // Action from l.276 c. 24
+      // Action from l.337 c. 24
       action_stall();
    }
-   else if (meta_state == MSI_IS_BD)
+   else if (meta_state == MSI_EXCLUSIVE)
    {
-      // Action from l.61 c. 24
-      action_stall();
+      // Action from l.-1 c. -1
+      action_clear_interference_by(CMD_CCTRL_EVICT);
+      // Action from l.-1 c. -1
+      action_propagate_use_count();
+      // Action from l.-1 c. -1
+      action_mark_as_cache_miss();
+      // Action from l.-1 c. -1
+      action_acted();
+      // Action from l.546 c. 10
+      action_send_query(CMD_CCTRL_PUT_MODIFIED);
+      // Action from l.547 c. 10
+      action_set_state(MSI_EI_B);
    }
    else if (meta_state == MSI_SM_D_I)
    {
-      // Action from l.342 c. 24
+      // Action from l.406 c. 24
       action_stall();
    }
    else if (meta_state == MSI_IM_D_S)
    {
-      // Action from l.210 c. 24
+      // Action from l.268 c. 24
       action_stall();
    }
 }
@@ -3811,6 +4203,8 @@ void parse_request ()
    req.addr = msg_in.addr_t_params[0];
    req.instruction_addr = msg_in.int_t_param;
    req.requester = get_emitter();
+   req.is_cache_hit = TRUE;
+   req.interference_origin = DEFAULT_ORIGIN_VALUE;
 
    req_cmd = req.cmd;
 
@@ -3943,6 +4337,7 @@ void emit_query ()
    transient_msg.addr_t_params[0] = current_query.addr;
    transient_msg.cmp_id_t_params[CMP_ID_T_EMITTER_PARAM] = current_query.author;
    transient_msg.cmd_id_t_param = current_query.cmd;
+   transient_msg.int_t_param = current_query.iline;
 
    current_query = DEFAULT_QUERY_VALUE;
 }
@@ -3955,122 +4350,174 @@ void add_bus_master ()
 /*[CC_HANDLE_DATA]*/
 void handle_CMD_DATA_MSG ()
 {
-   if (meta_state == MSI_IM_BD)
+   if (meta_state == MSI_IM_D_SI)
    {
-      // Action from l.136 c. 10
-      action_set_state(MSI_IM_B);
-   }
-   else if (meta_state == MSI_IM_D_SI)
-   {
-      // Action from l.238 c. 10
+      // Action from l.297 c. 10
       action_send_data_to_memory(CMD_DATA_MSG);
-      // Action from l.239 c. 10
+      // Action from l.298 c. 10
       action_send_data_to_reply_to(CMD_DATA_MSG);
-      // Action from l.240 c. 10
+      // Action from l.299 c. 10
       action_complete(CMD_CCTRL_STORE);
-      // Action from l.241 c. 10
+      // Action from l.300 c. 10
       action_reset_reply_to();
-      // Action from l.242 c. 10
+      // Action from l.301 c. 10
       action_set_state(MSI_INVALID);
    }
    else if (meta_state == MSI_IS_D)
    {
-      // Action from l.97 c. 10
+      // Action from l.104 c. 10
       action_complete(CMD_CCTRL_LOAD);
-      // Action from l.98 c. 10
+      // Action from l.105 c. 10
+      action_reset_reply_to();
+      // Action from l.106 c. 10
       action_set_state(MSI_SHARED);
-   }
-   else if (meta_state == MSI_SM_D)
-   {
-      // Action from l.322 c. 10
-      action_complete(CMD_CCTRL_STORE);
-      // Action from l.323 c. 10
-      action_set_state(MSI_MODIFIED);
    }
    else if (meta_state == MSI_SM_D_SI)
    {
-      // Action from l.389 c. 10
+      // Action from l.455 c. 10
       action_send_data_to_memory(CMD_DATA_MSG);
-      // Action from l.390 c. 10
+      // Action from l.456 c. 10
       action_send_data_to_reply_to(CMD_DATA_MSG);
-      // Action from l.391 c. 10
+      // Action from l.457 c. 10
       action_complete(CMD_CCTRL_STORE);
-      // Action from l.392 c. 10
+      // Action from l.458 c. 10
       action_reset_reply_to();
-      // Action from l.393 c. 10
-      action_set_state(MSI_INVALID);
-   }
-   else if (meta_state == MSI_IM_D_I)
-   {
-      // Action from l.195 c. 10
-      action_send_data_to_reply_to(CMD_DATA_MSG);
-      // Action from l.196 c. 10
-      action_complete(CMD_CCTRL_STORE);
-      // Action from l.197 c. 10
-      action_reset_reply_to();
-      // Action from l.198 c. 10
-      action_set_state(MSI_INVALID);
-   }
-   else if (meta_state == MSI_IS_D_I)
-   {
-      // Action from l.117 c. 10
-      action_complete(CMD_CCTRL_LOAD);
-      // Action from l.118 c. 10
+      // Action from l.459 c. 10
       action_set_state(MSI_INVALID);
    }
    else if (meta_state == MSI_IM_D)
    {
-      // Action from l.169 c. 10
+      // Action from l.225 c. 10
       action_complete(CMD_CCTRL_STORE);
-      // Action from l.170 c. 10
+      // Action from l.226 c. 10
       action_set_state(MSI_MODIFIED);
+   }
+   else if (meta_state == MSI_IEOS_D)
+   {
+      // Action from l.133 c. 10
+      action_complete(CMD_CCTRL_LOAD);
+      // Action from l.134 c. 10
+      action_set_state(MSI_SHARED);
+   }
+   else if (meta_state == MSI_IS_BD)
+   {
+      // Action from l.70 c. 21
+      action_set_state(MSI_IS_B);
+   }
+   else if (meta_state == MSI_IM_BD)
+   {
+      // Action from l.190 c. 10
+      action_set_state(MSI_IM_B);
+   }
+   else if (meta_state == MSI_SM_D)
+   {
+      // Action from l.385 c. 10
+      action_complete(CMD_CCTRL_STORE);
+      // Action from l.386 c. 10
+      action_set_state(MSI_MODIFIED);
+   }
+   else if (meta_state == MSI_IM_D_I)
+   {
+      // Action from l.252 c. 10
+      action_send_data_to_reply_to(CMD_DATA_MSG);
+      // Action from l.253 c. 10
+      action_complete(CMD_CCTRL_STORE);
+      // Action from l.254 c. 10
+      action_reset_reply_to();
+      // Action from l.255 c. 10
+      action_set_state(MSI_INVALID);
+   }
+   else if (meta_state == MSI_IS_D_I)
+   {
+      // Action from l.163 c. 10
+      action_reset_reply_to();
+      // Action from l.164 c. 10
+      action_complete(CMD_CCTRL_LOAD);
+      // Action from l.165 c. 10
+      action_set_state(MSI_INVALID);
    }
    else if (meta_state == MSI_SM_D_S)
    {
-      // Action from l.366 c. 10
+      // Action from l.431 c. 10
       action_send_data_to_memory(CMD_DATA_MSG);
-      // Action from l.367 c. 10
+      // Action from l.432 c. 10
       action_send_data_to_reply_to(CMD_DATA_MSG);
-      // Action from l.368 c. 10
+      // Action from l.433 c. 10
       action_complete(CMD_CCTRL_STORE);
-      // Action from l.369 c. 10
+      // Action from l.434 c. 10
       action_reset_reply_to();
-      // Action from l.370 c. 10
+      // Action from l.435 c. 10
       action_set_state(MSI_SHARED);
    }
    else if (meta_state == MSI_SM_BD)
    {
-      // Action from l.283 c. 10
+      // Action from l.344 c. 10
       action_set_state(MSI_SM_B);
-   }
-   else if (meta_state == MSI_IS_BD)
-   {
-      // Action from l.65 c. 21
-      action_set_state(MSI_IS_B);
    }
    else if (meta_state == MSI_SM_D_I)
    {
-      // Action from l.347 c. 10
+      // Action from l.411 c. 10
       action_send_data_to_reply_to(CMD_DATA_MSG);
-      // Action from l.348 c. 10
+      // Action from l.412 c. 10
       action_complete(CMD_CCTRL_STORE);
-      // Action from l.349 c. 10
+      // Action from l.413 c. 10
       action_reset_reply_to();
-      // Action from l.350 c. 10
+      // Action from l.414 c. 10
       action_set_state(MSI_INVALID);
    }
    else if (meta_state == MSI_IM_D_S)
    {
-      // Action from l.215 c. 10
+      // Action from l.273 c. 10
       action_send_data_to_memory(CMD_DATA_MSG);
-      // Action from l.216 c. 10
+      // Action from l.274 c. 10
       action_send_data_to_reply_to(CMD_DATA_MSG);
-      // Action from l.217 c. 10
+      // Action from l.275 c. 10
       action_complete(CMD_CCTRL_STORE);
-      // Action from l.218 c. 10
+      // Action from l.276 c. 10
       action_reset_reply_to();
-      // Action from l.219 c. 10
+      // Action from l.277 c. 10
       action_set_state(MSI_SHARED);
+   }
+}
+void handle_CMD_DATA_EXCLUSIVE_MSG ()
+{
+   if (meta_state == MSI_IS_D)
+   {
+      // Action from l.110 c. 10
+      action_complete(CMD_CCTRL_LOAD);
+      // Action from l.111 c. 10
+      action_send_data_to_reply_to(CMD_DATA_MSG);
+      // Action from l.112 c. 10
+      action_reset_reply_to();
+      // Action from l.113 c. 10
+      action_send_data_to_memory(CMD_DATA_EXCLUSIVE_MSG);
+      // Action from l.114 c. 10
+      action_set_state(MSI_SHARED);
+   }
+   else if (meta_state == MSI_IEOS_D)
+   {
+      // Action from l.138 c. 10
+      action_complete(CMD_CCTRL_LOAD);
+      // Action from l.139 c. 10
+      action_set_state(MSI_EXCLUSIVE);
+   }
+   else if (meta_state == MSI_IS_BD)
+   {
+      // Action from l.71 c. 31
+      action_set_state(MSI_IE_B);
+   }
+   else if (meta_state == MSI_IS_D_I)
+   {
+      // Action from l.168 c. 10
+      action_complete(CMD_CCTRL_LOAD);
+      // Action from l.169 c. 10
+      action_send_data_to_reply_to(CMD_DATA_MSG);
+      // Action from l.170 c. 10
+      action_send_data_to_memory(CMD_DATA_EXCLUSIVE_MSG);
+      // Action from l.171 c. 10
+      action_reset_reply_to();
+      // Action from l.172 c. 10
+      action_set_state(MSI_INVALID);
    }
 }
 /*[/CC_HANDLE_DATA]*/
@@ -4093,6 +4540,10 @@ void handle_data_reception ()
    if (data_type == CMD_DATA_MSG)
    {
       handle_CMD_DATA_MSG();
+   }
+   else if (data_type == CMD_DATA_EXCLUSIVE_MSG)
+   {
+      handle_CMD_DATA_EXCLUSIVE_MSG();
    }
    /*[/CC_HANDLE_DATA_SWITCH]*/
 }
@@ -4122,6 +4573,7 @@ void initialize ()
    {
       cache_local_address_infos[i].hit = 0;
       cache_local_address_infos[i].miss = 0;
+      cache_local_address_infos[i].last_origin = DEFAULT_ORIGIN_VALUE;
 
       for (j = 0; j &lt; INTERFERENCE_TYPES; ++j)
       {
@@ -4221,7 +4673,7 @@ unblock_request()</label>
 			<target ref="id26"/>
 			<label kind="guard" x="-713" y="-332">!should_unstall()
 &amp;&amp; !should_emit_query()</label>
-			<label kind="synchronisation" x="-713" y="-298">FORCE_URGENT!</label>
+			<label kind="synchronisation" x="-713" y="-298">FORCE_EXTRA_URGENT!</label>
 			<label kind="assignment" x="-714" y="-281">clean()</label>
 			<label kind="comments" x="-663" y="-281">T9</label>
 			<nail x="-722" y="-255"/>
@@ -4245,7 +4697,7 @@ unblock_request()</label>
 			<target ref="id22"/>
 			<label kind="guard" x="-663" y="-230">should_unstall()
 &amp;&amp;!should_emit_query()</label>
-			<label kind="synchronisation" x="-663" y="-196">FORCE_URGENT!</label>
+			<label kind="synchronisation" x="-663" y="-196">FORCE_EXTRA_URGENT!</label>
 			<label kind="assignment" x="-663" y="-179">keep_unstalling_requests()</label>
 			<label kind="comments" x="-697" y="-204">T8</label>
 			<nail x="-476" y="-153"/>
@@ -4412,6 +4864,7 @@ void push_query (query_t &amp;array[MAX_QUERY_BUFFER_SIZE], const int array_size
    query0.addr = transient_msg.addr_t_params[0];
    query0.cmd = transient_msg.cmd_id_t_param;
    query0.author = transient_msg.cmp_id_t_params[CMP_ID_T_EMITTER_PARAM];
+   query0.iline = transient_msg.int_t_param;
 
    push
    (
@@ -4430,6 +4883,7 @@ void pop_query (query_t &amp;array[MAX_QUERY_BUFFER_SIZE], const int array_size)
    transient_msg.addr_t_params[0] = query0.addr;
    transient_msg.cmp_id_t_params[CMP_ID_T_EMITTER_PARAM] = query0.author;
    transient_msg.cmd_id_t_param = query0.cmd;
+   transient_msg.int_t_param = query0.iline;
 
    pop(array, array_size);
 }
@@ -4790,6 +5244,10 @@ system
 			<comment>States that all cores always end up completing their program.</comment>
 		</query>
 		<query>
+			<formula></formula>
+			<comment></comment>
+		</query>
+		<query>
 			<formula>A[]
 (
    forall (addr: addr_t)
@@ -4819,16 +5277,144 @@ In other words, this tests the "Single Writer or Multiple Readers" property for 
 			<comment></comment>
 		</query>
 		<query>
-			<formula>A[]((CCTRL2.completed_requests[0].instruction_addr == 6) imply (not CCTRL2.completed_requests[0].is_cache_hit))</formula>
-			<comment>This detects Always Misses.</comment>
+			<formula></formula>
+			<comment></comment>
 		</query>
 		<query>
-			<formula>A[]((CCTRL2.completed_requests[0].instruction_addr == 6) imply CCTRL2.completed_requests[0].is_cache_hit)</formula>
-			<comment>This detects Always Hits.</comment>
+			<formula>A[]((CCTRL1.completed_requests[0].instruction_addr == target_addr) imply (not CCTRL1.completed_requests[0].is_cache_hit))</formula>
+			<comment>This detects Always Misses on Cache2.</comment>
+		</query>
+		<query>
+			<formula>A[]((CCTRL1.completed_requests[0].instruction_addr == target_addr) imply CCTRL1.completed_requests[0].is_cache_hit)</formula>
+			<comment>This detects Always Hits on Cache1.</comment>
 		</query>
 		<query>
 			<formula></formula>
-			<comment>TODO: only first miss.</comment>
+			<comment></comment>
+		</query>
+		<query>
+			<formula>A[]((CCTRL2.completed_requests[0].instruction_addr == target_addr) imply (not CCTRL2.completed_requests[0].is_cache_hit))</formula>
+			<comment>This detects Always Misses on Cache2.</comment>
+		</query>
+		<query>
+			<formula>A[]((CCTRL2.completed_requests[0].instruction_addr == target_addr) imply CCTRL2.completed_requests[0].is_cache_hit)</formula>
+			<comment>This detects Always Hits on Cache2.</comment>
+		</query>
+		<query>
+			<formula></formula>
+			<comment></comment>
+		</query>
+		<query>
+			<formula>sup:
+	CCTRL1.cache_local_address_infos[target_addr].hit,
+	CCTRL1.cache_local_address_infos[target_addr].miss,
+	CCTRL2.cache_local_address_infos[target_addr].hit,
+	CCTRL2.cache_local_address_infos[target_addr].miss</formula>
+			<comment></comment>
+		</query>
+		<query>
+			<formula>inf{Core1.Terminated and Core2.Terminated}:
+	CCTRL1.cache_local_address_infos[target_addr].hit,
+	CCTRL1.cache_local_address_infos[target_addr].miss,
+	CCTRL2.cache_local_address_infos[target_addr].hit,
+	CCTRL2.cache_local_address_infos[target_addr].miss</formula>
+			<comment></comment>
+		</query>
+		<query>
+			<formula></formula>
+			<comment></comment>
+		</query>
+		<query>
+			<formula>sup:
+	CCTRL1.cache_local_address_infos[target_addr].potential_interference_count[INTERFERENCE_MINOR],
+	CCTRL1.cache_local_address_infos[target_addr].interference_count[INTERFERENCE_MINOR],
+	CCTRL1.cache_local_address_infos[target_addr].potential_interference_count[INTERFERENCE_DEMOTING],
+	CCTRL1.cache_local_address_infos[target_addr].interference_count[INTERFERENCE_DEMOTING],
+	CCTRL1.cache_local_address_infos[target_addr].potential_interference_count[INTERFERENCE_EXPELLING],
+	CCTRL1.cache_local_address_infos[target_addr].interference_count[INTERFERENCE_EXPELLING],
+	CCTRL2.cache_local_address_infos[target_addr].potential_interference_count[INTERFERENCE_MINOR],
+	CCTRL2.cache_local_address_infos[target_addr].interference_count[INTERFERENCE_MINOR],
+	CCTRL2.cache_local_address_infos[target_addr].potential_interference_count[INTERFERENCE_DEMOTING],
+	CCTRL2.cache_local_address_infos[target_addr].interference_count[INTERFERENCE_DEMOTING],
+	CCTRL2.cache_local_address_infos[target_addr].potential_interference_count[INTERFERENCE_EXPELLING],
+	CCTRL2.cache_local_address_infos[target_addr].interference_count[INTERFERENCE_EXPELLING]</formula>
+			<comment></comment>
+		</query>
+		<query>
+			<formula>inf{Core1.Terminated and Core2.Terminated}:
+	CCTRL1.cache_local_address_infos[target_addr].potential_interference_count[INTERFERENCE_MINOR],
+	CCTRL1.cache_local_address_infos[target_addr].interference_count[INTERFERENCE_MINOR],
+	CCTRL1.cache_local_address_infos[target_addr].potential_interference_count[INTERFERENCE_DEMOTING],
+	CCTRL1.cache_local_address_infos[target_addr].interference_count[INTERFERENCE_DEMOTING],
+	CCTRL1.cache_local_address_infos[target_addr].potential_interference_count[INTERFERENCE_EXPELLING],
+	CCTRL1.cache_local_address_infos[target_addr].interference_count[INTERFERENCE_EXPELLING],
+	CCTRL2.cache_local_address_infos[target_addr].potential_interference_count[INTERFERENCE_MINOR],
+	CCTRL2.cache_local_address_infos[target_addr].interference_count[INTERFERENCE_MINOR],
+	CCTRL2.cache_local_address_infos[target_addr].potential_interference_count[INTERFERENCE_DEMOTING],
+	CCTRL2.cache_local_address_infos[target_addr].interference_count[INTERFERENCE_DEMOTING],
+	CCTRL2.cache_local_address_infos[target_addr].potential_interference_count[INTERFERENCE_EXPELLING],
+	CCTRL2.cache_local_address_infos[target_addr].interference_count[INTERFERENCE_EXPELLING]</formula>
+			<comment></comment>
+		</query>
+		<query>
+			<formula></formula>
+			<comment></comment>
+		</query>
+		<query>
+			<formula>A[]((CCTRL2.completed_requests[0].instruction_addr == target_addr) imply (CCTRL2.completed_requests[0].interference_origin.author &lt;= 0))</formula>
+			<comment></comment>
+		</query>
+		<query>
+			<formula>A&lt;&gt;((CCTRL1.completed_requests[0].instruction_addr == target_addr) and (CCTRL1.completed_requests[0].interference_origin.author == CMP_ID_T_NULL))</formula>
+			<comment></comment>
+		</query>
+		<query>
+			<formula></formula>
+			<comment></comment>
+		</query>
+		<query>
+			<formula>E&lt;&gt;((CCTRL1.completed_requests[0].instruction_addr == target_addr) and (CCTRL1.completed_requests[0].interference_origin.author != CMP_ID_T_NULL))</formula>
+			<comment></comment>
+		</query>
+		<query>
+			<formula>E&lt;&gt;(CCTRL2.completed_requests[0].interference_origin.author == CCTRL1.ID)</formula>
+			<comment></comment>
+		</query>
+		<query>
+			<formula>inf{((CCTRL2.completed_requests[0].instruction_addr == target_addr) and (CCTRL2.completed_requests[0].interference_origin.author == CCTRL1.ID))}: CCTRL2.completed_requests[0].interference_origin.iline</formula>
+			<comment></comment>
+		</query>
+		<query>
+			<formula>sup{((CCTRL2.completed_requests[0].instruction_addr == target_addr) and (CCTRL2.completed_requests[0].interference_origin.author == CCTRL1.ID))}: CCTRL2.completed_requests[0].interference_origin.iline</formula>
+			<comment></comment>
+		</query>
+		<query>
+			<formula>E&lt;&gt;((CCTRL2.completed_requests[0].instruction_addr == target_addr) and (CCTRL2.completed_requests[0].interference_origin.author == CCTRL1.ID) and (CCTRL2.completed_requests[0].interference_origin.iline == target_addr2))</formula>
+			<comment></comment>
+		</query>
+		<query>
+			<formula>E&lt;&gt;((CCTRL2.completed_requests[0].instruction_addr == target_addr) and (CCTRL2.completed_requests[0].interference_origin.author == CCTRL1.ID) and (CCTRL2.completed_requests[0].interference_origin.iline == target_addr2) and (CCTRL2.completed_requests[0].interference_type == INTERFERENCE_DEMOTING))</formula>
+			<comment></comment>
+		</query>
+		<query>
+			<formula>A[]((CCTRL2.completed_requests[0].instruction_addr == target_addr) imply ((CCTRL2.completed_requests[0].interference_origin.author == CCTRL1.ID) and (CCTRL2.completed_requests[0].interference_origin.iline == target_addr2) and (CCTRL2.completed_requests[0].interference_type == INTERFERENCE_DEMOTING)))</formula>
+			<comment></comment>
+		</query>
+		<query>
+			<formula>E&lt;&gt;((CCTRL2.completed_requests[0].instruction_addr == target_addr) and (CCTRL2.completed_requests[0].interference_origin.author == CCTRL1.ID) and (CCTRL2.completed_requests[0].interference_origin.iline == target_addr2) and (CCTRL2.completed_requests[0].interference_type == INTERFERENCE_EXPELLING))</formula>
+			<comment></comment>
+		</query>
+		<query>
+			<formula>A[]((CCTRL2.completed_requests[0].instruction_addr == target_addr) imply ((CCTRL2.completed_requests[0].interference_origin.author == CCTRL1.ID) and (CCTRL2.completed_requests[0].interference_origin.iline == target_addr2) and (CCTRL2.completed_requests[0].interference_type == INTERFERENCE_EXPELLING)))</formula>
+			<comment></comment>
+		</query>
+		<query>
+			<formula>A&lt;&gt;((CCTRL2.completed_requests[0].instruction_addr == target_addr) and (CCTRL2.completed_requests[0].interference_origin.author == CCTRL1.ID))</formula>
+			<comment></comment>
+		</query>
+		<query>
+			<formula></formula>
+			<comment></comment>
 		</query>
 		<query>
 			<formula>sup{not Core1.Terminated}: Core1.runtime
